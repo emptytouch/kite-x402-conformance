@@ -1,0 +1,51 @@
+{
+  "name": "kite-x402-conformance",
+  "version": "0.1.0",
+  "description": "Black-box conformance checker for x402 paid HTTP APIs on the Kite chain",
+  "keywords": ["kite", "x402", "conformance", "cli", "payments", "eip-3009"],
+  "license": "Apache-2.0",
+  "author": "emptytouch",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/emptytouch/kite-x402-conformance.git"
+  },
+  "homepage": "https://github.com/emptytouch/kite-x402-conformance#readme",
+  "bugs": {
+    "url": "https://github.com/emptytouch/kite-x402-conformance/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "x402conf": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE", "CHANGELOG.md", "docs", ".env.example"],
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "example": "tsx examples/mock-seller.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "picocolors": "^1.1.1",
+    "viem": "^2.23.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.9"
+  }
+}
