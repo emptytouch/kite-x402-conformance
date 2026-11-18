@@ -10,17 +10,19 @@ npm run build      # 产出 dist/
 npm run check      # 上面三步串起来，提交前必跑
 ```
 
-当前基线：**3 个测试文件 / 30 个用例全绿**（`typecheck` 无输出即通过）。
+当前基线：**5 个测试文件 / 100 个用例全绿**（`typecheck` 无输出即通过）。
 
 ## 覆盖场景
 
 | 测试文件 | 覆盖点 |
 |---|---|
-| `test/c2-challenge.test.ts`（17） | 完整合规载荷全过；非 402；缺头；头不可解码；非 v2；网络错误；数字 chainId；地址非法；收款方不一致；未配置收款方时 skip；金额 `0` / `12.5` / `-5` / `1e6` 四种非法；`amount` 别名；`accepts` 为对象；无支付选项 |
+| `test/c2-challenge.test.ts`（21） | 完整合规载荷全过；非 402；缺头；头不可解码；非 v2；网络错误；数字 chainId；地址非法；收款方不一致；未配置收款方时 skip；金额 `0` / `12.5` / `-5` / `1e6` 四种非法；`amount` 别名；`accepts` 为对象；无支付选项 |
 | `test/wire.test.ts`（8） | base64 往返；裸 JSON；base64url；百分号编码；垃圾输入 fail-closed；空值；header 名大小写 |
-| `test/networks.test.ts`（5） | 链 id 常量；未确证网络不伪造端点；CAIP-2 / 数字 / 字符串归一化；跨网络拒绝；缺失值 fail-closed |
+| `test/networks.test.ts`（9） | 链 id 常量；未确证网络不伪造端点；CAIP-2 / 数字 / 字符串归一化；跨网络拒绝；缺失值 fail-closed |
+| `test/c3-authorization.test.ts`（46） | 完整载荷 14 条全过；挑战缺失/不可解码/无选项；载荷缺失/不可解码；v1 载荷拒绝；`accepted` 缺失与漂移；收款方与金额不符；零地址与自转；`extra` 缺失；窗口未开始/即将过期/恰好 6 秒/倒置/按注入时刻评估；`maxTimeoutSeconds` 告警与覆盖；v=0/1；高 s；ERC-6492 skip；内容不符；域版本与 chainId 归因；字段别名与多问题上报 |
+| `test/eip712.test.ts`（16） | 域分隔符与摘要对齐 viem；固定黄金值；只改 version/chainId/name 时摘要变化；结构散列逐字段敏感；签名恢复；v=0/1 与高 s 判定；长度/非 hex/越界 v 拒绝 |
 
-**未覆盖**：真实网络请求、真实 facilitator、真实签名（C3 起才有）。这几项属于后续里程碑，测试策略见 `docs/CHECKS.md` 的「待确认项」。
+**未覆盖**：真实网络请求、真实 facilitator、真实链上结算。C3 的签名是测试内用固定私钥真实生成的（不是桩），但**没有**向任何链接广播；`examples/mock-payer.ts` 也一样，只做本地 EIP-712 计算。真实结算属 C4/C5，见 `docs/CHECKS.md` 的「待确认项」。
 
 ## 干净环境复现
 

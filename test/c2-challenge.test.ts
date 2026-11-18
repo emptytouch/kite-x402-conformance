@@ -109,6 +109,27 @@ describe("C2 — 402 challenge structure", () => {
     expect(results["c2.amount"]?.status).toBe("fail");
   });
 
+  it("refuses an amount sent as an unsafe JSON number instead of reporting a rounded value", () => {
+    const results = byId(
+      checkChallenge(
+        input({
+          x402Version: 2,
+          accepts: [
+            {
+              scheme: "exact",
+              network: "eip155:2368",
+              asset: ASSET,
+              payTo: PAY_TO,
+              amount: 9007199254740993,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(results["c2.amount"]?.status).toBe("fail");
+    expect(results["c2.amount"]?.detail).toMatch(/2\^53|decimal string/);
+  });
+
   it("accepts `amount` as an alias for maxAmountRequired", () => {
     const results = byId(
       checkChallenge(
@@ -125,6 +146,47 @@ describe("C2 — 402 challenge structure", () => {
       ),
     );
     expect(results["c2.scheme"]?.status).toBe("pass");
+  });
+
+  it("fails when the option has no asset field (critical, not skip)", () => {
+    const results = byId(
+      checkChallenge(
+        input({
+          x402Version: 2,
+          accepts: [{ scheme: "exact", network: "eip155:2368", payTo: PAY_TO, amount: "1000" }],
+        }),
+      ),
+    );
+    expect(results["c2.asset"]?.status).toBe("fail");
+    expect(results["c2.asset"]?.level).toBe("critical");
+    expect(results["c2.asset"]?.detail).toMatch(/no asset field/);
+  });
+
+  it("skips an empty network alias and uses chainId instead", () => {
+    const results = byId(
+      checkChallenge(
+        input({
+          x402Version: 2,
+          accepts: [
+            {
+              scheme: "exact",
+              network: "",
+              chainId: "eip155:2368",
+              asset: ASSET,
+              payTo: PAY_TO,
+              amount: "1000",
+            },
+          ],
+        }),
+      ),
+    );
+    expect(results["c2.network"]?.status).toBe("pass");
+  });
+
+  it("throws on an expectedNetwork inherited from Object.prototype", () => {
+    expect(() =>
+      checkChallenge({ status: 402, headers: {}, expectedNetwork: "toString" as "testnet" }),
+    ).toThrow(/expectedNetwork/);
   });
 
   it("fails when there is no payment option at all", () => {

@@ -1,6 +1,6 @@
 {
   "name": "kite-x402-conformance",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Black-box conformance checker for x402 paid HTTP APIs on the Kite chain",
   "keywords": ["kite", "x402", "conformance", "cli", "payments", "eip-3009"],
   "license": "Apache-2.0",
@@ -30,6 +30,7 @@
   "scripts": {
     "dev": "tsx src/cli.ts",
     "example": "tsx examples/mock-seller.ts",
+    "example:pay": "tsx examples/mock-payer.ts",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

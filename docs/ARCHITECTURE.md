@@ -11,16 +11,22 @@ kite-x402-conformance/
 │  ├─ config.ts               # 环境变量 schema 与启动校验
 │  ├─ networks.ts             # Kite 网络常量与 network 字段归一化
 │  ├─ wire.ts                 # PAYMENT-* 头的 base64/JSON 编解码
+│  ├─ eip712.ts               # EIP-712 域/结构散列、EIP-3009 摘要、65 字节签名解析
 │  ├─ index.ts                # 库入口（供程序化调用）
 │  └─ checks/
 │     ├─ types.ts             # CheckResult 模型与 pass/fail/skip 构造器
-│     └─ c2-challenge.ts      # C2：402 挑战结构（10 条断言）
+│     ├─ parse.ts             # C2/C3 共用的字段别名读取
+│     ├─ c2-challenge.ts      # C2：402 挑战结构（10 条断言）
+│     └─ c3-authorization.ts  # C3：授权可构造（14 条断言）
 ├─ test/
 │  ├─ c2-challenge.test.ts    # C2 正例、反例、别名、边界
+│  ├─ c3-authorization.test.ts# C3 正例、拒付路径、窗口边界、归因
+│  ├─ eip712.test.ts          # 手写编码与 viem 逐字节比对、黄金值、签名解析
 │  ├─ wire.test.ts            # 编解码与畸形输入
 │  └─ networks.test.ts        # 网络归一化与确证标记
 ├─ examples/
-│  └─ mock-seller.ts          # 合成卖家：正常 / 坏样本两种模式的演示数据
+│  ├─ mock-seller.ts          # 合成卖家：正常 / 坏样本两种模式的演示数据
+│  └─ mock-payer.ts           # 合成付款方：对挑战签名并打印 PAYMENT-SIGNATURE
 ├─ docs/                      # 架构、CLI、检查项、测试、限制、证据、提交材料
 ├─ .github/workflows/ci.yml   # typecheck → test → build → CLI smoke
 ├─ .env.example               # 配置模板（不含真实密钥）
@@ -38,8 +44,13 @@ kite-x402-conformance/
 | `wire.ts` | 头的编解码；畸形输入返回错误而不是空对象 | 判断协议是否合规 |
 | `checks/types.ts` | 统一结果模型（`pass` / `fail` / `skip`）与严重级别 | — |
 | `checks/c2-challenge.ts` | C2 的 10 条断言，纯函数，输入为状态码 + headers | 网络 IO、报告输出 |
+| `checks/c3-authorization.ts` | C3 的 14 条断言，输入为两个头值 + 评估时刻；签名恢复是 CPU 计算，不联网 | 网络 IO、报告输出、链上状态 |
+| `checks/parse.ts` | 字段别名读取（`amount`/`maxAmountRequired` 等），一份规则两处复用 | 判断合规性 |
+| `eip712.ts` | 手写 EIP-712 域分隔符与结构散列、EIP-3009 摘要、65 字节签名解析（含 v 与低 s 判定） | 决定断言级别 |
 
-依赖方向单向：`cli → checks → (wire, networks)`；`config` 只被 `cli` 使用。`checks` 内部不发请求、不读环境变量，因此可以用固定输入做纯单测。
+依赖方向单向：`cli → checks → (wire, networks, eip712)`；`config` 只被 `cli` 使用。`checks` 内部不发请求、不读环境变量，因此可以用固定输入做单测——C3 的 `now` 也是这样从 runner 注入的，否则测试会随系统时钟漂移。
+
+`eip712.ts` 不调用 viem 的 `hashTypedData`，而是显式拼每一段字节：签名失败时，唯一能定位问题的产物是 domain separator 与 struct hash，而不是一个不透明摘要。代价是这段编码必须被独立验证，所以 `test/eip712.test.ts` 同时做了两件事——与 viem 的 `domainSeparator` / `hashTypedData` 逐字节比对，以及固定一组 Kite testnet 的黄金值。
 
 ## 关键流程：一次 `check`
 
@@ -64,6 +75,34 @@ kite-x402-conformance/
 ```
 
 前置断言失败时，后续依赖它的断言记为 `skip` 而不是 `fail`，避免一个根因刷出十条红字；同时报告底部明确提示「skip 不代表通过」。
+
+## 关键流程：一次 `authorize`
+
+```
+1. cli 解析参数
+   ├─ 挑战来源：<url> 现取 402，或 --challenge <path> 读已保存的载荷（离线模式）
+   └─ 载荷来源：--payment-signature <value|@path>
+2. now 由 runner 决定：系统时钟，或 --now 指定的时刻
+3. checkAuthorization({challengeHeader, paymentHeader, expectedNetwork, now, ...})
+   ├─ c3.challenge        挑战可解码且含支付选项
+   ├─ c3.payment          载荷可解码为 JSON 对象
+   ├─ c3.payload-version  x402Version === 2
+   ├─ c3.payload-shape    authorization 六个字段齐全且类型正确
+   ├─ c3.accepted-binding payload.accepted 与挑战选项逐字段一致
+   ├─ c3.binding-payto    authorization.to === 报价 payTo
+   ├─ c3.binding-value    authorization.value === 报价金额（bigint 比较）
+   ├─ c3.address-sanity   from/to 非零且互不相同
+   ├─ c3.domain-config    extra.name / extra.version 可用，chainId 与 asset 可解析
+   ├─ c3.window           validAfter <= now 且 validBefore >= now + 6
+   ├─ c3.window-span      剩余可重放时间不超过 maxTimeoutSeconds（warning）
+   ├─ c3.signature-format 65 字节 r‖s‖v，v ∈ {27,28}
+   ├─ c3.signature-low-s  s <= n/2
+   └─ c3.signature-recovery 复算 digest 后 ecrecover === authorization.from
+4. 汇总 pass/fail/skip → 渲染（人类可读或 --json，附带 evaluatedAt）
+5. 退出码规则与 check 相同
+```
+
+`c3.signature-recovery` 是唯一会做多次椭圆曲线运算的断言：失败时它会把 `version` 与 `chainId` 的各种组合重新算一遍，用来判断「客户到底对着哪个域签的」。这段计算在 `authorize` 里是可观测的（报告耗时约毫秒级），不构成性能问题。
 
 ## 设计决策
 

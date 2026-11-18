@@ -61,6 +61,11 @@ export interface NetworkMatch {
  * the expected CAIP-2 id. Anything else fails closed.
  */
 export function matchNetwork(advertised: unknown, expected: KiteNetworkName): NetworkMatch {
+  // `in` would accept inherited keys such as "toString", then dereference a
+  // function instead of a network. hasOwn keeps the boundary honest.
+  if (!Object.hasOwn(KITE_NETWORKS, expected)) {
+    throw new TypeError(`matchNetwork: unknown expectedNetwork "${String(expected)}"`);
+  }
   const target = KITE_NETWORKS[expected].caip2;
 
   if (typeof advertised === "number") {
@@ -82,4 +87,29 @@ export function matchNetwork(advertised: unknown, expected: KiteNetworkName): Ne
   }
 
   return { ok: false, normalised: null, reason: "network field is missing or not a string/number" };
+}
+
+/**
+ * Extract the EIP-155 chain id from whatever a payload advertised.
+ *
+ * EIP-712 signatures commit to a numeric `chainId`, but challenges advertise
+ * `eip155:2368`, `2368` or `"2368"` depending on the SDK build. This is the
+ * single conversion point for all three; anything unrecognised returns
+ * `undefined` rather than a guess, because a wrong chain id silently changes the
+ * domain separator and every signature stops recovering.
+ */
+export function chainIdFromNetworkField(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    // 2^53 and above are not exact after JSON.parse; using one as a chain id
+    // would silently change the signed EIP-712 domain.
+    return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+  }
+  if (typeof value !== "string") return undefined;
+
+  const raw = value.trim();
+  const digits = /^\d+$/.test(raw) ? raw : /^eip155:(\d+)$/i.exec(raw)?.[1];
+  if (digits === undefined) return undefined;
+
+  const parsed = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }

@@ -1,11 +1,14 @@
 /**
  * Demo seller for trying the checker without touching a real service or funds.
  *
- *   npm run example                 # valid 402 challenge on :8080
+ *   npm run example                   # valid v2 402 challenge on :8080
  *   DEMO_MODE=broken npm run example  # 402 with no PAYMENT-REQUIRED header
  *
- * The challenge below is synthetic: it advertises a placeholder payTo and asset.
- * It is not a payment destination and nothing here moves funds.
+ * The challenge is shaped exactly as x402 v2 expects — `resource` at the top
+ * level, `amount`/`maxTimeoutSeconds`/`extra` inside the option — because a demo
+ * that gets the shape wrong teaches the wrong shape. The payTo and asset are
+ * placeholders: they belong to nobody and nothing here moves funds. `extra.name`
+ * is deliberately synthetic so no one mistakes this for a real token's domain.
  */
 import { createServer } from "node:http";
 
@@ -20,17 +23,20 @@ const ASSET = "0x0f5d2fb29fb7d3cfee444a200298f468908cc942";
 const challenge = {
   x402Version: 2,
   error: "payment required",
+  resource: {
+    url: `http://localhost:${port}/v1/echo`,
+    description: "synthetic demo quote",
+    mimeType: "application/json",
+  },
   accepts: [
     {
       scheme: "exact",
       network: "eip155:2368",
       asset: ASSET,
       payTo: PAY_TO,
-      maxAmountRequired: "1000",
-      resource: "http://localhost:8080/v1/echo",
-      description: "synthetic demo quote",
-      maxTimeoutSeconds: 60,
-      extra: { name: "USDT", version: "1" },
+      amount: "1000",
+      maxTimeoutSeconds: 120,
+      extra: { name: "Demo USD", version: "1" },
     },
   ],
 };
@@ -59,5 +65,6 @@ const server = createServer((request, response) => {
 
 server.listen(port, () => {
   console.log(`demo seller on http://localhost:${port} (mode=${mode})`);
-  console.log(`try: node dist/cli.js check http://localhost:${port}/v1/echo`);
+  console.log(`try: npm run dev -- check http://localhost:${port}/v1/echo`);
+  console.log(`then: npm run example:pay`);
 });

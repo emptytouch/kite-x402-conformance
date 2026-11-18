@@ -1,8 +1,9 @@
 import { isAddress } from "viem";
 import { z } from "zod";
 
-import { matchNetwork, type KiteNetworkName } from "../networks.js";
+import { KITE_NETWORKS, matchNetwork, type KiteNetworkName } from "../networks.js";
 import { decodeHeaderValue, findHeader } from "../wire.js";
+import { asRecord, pickPaymentOption, pickRaw, pickString, unsafeIntegerFields } from "./parse.js";
 import { fail, pass, skip, type CheckResult } from "./types.js";
 
 /**
@@ -39,27 +40,13 @@ const FIELD_ALIASES = {
 
 const Envelope = z.object({ x402Version: z.number().int().positive() }).passthrough();
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  return value as Record<string, unknown>;
-}
-
-function pickString(record: Record<string, unknown>, keys: readonly string[]): string | undefined {
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === "string" && value.trim().length > 0) return value.trim();
-    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+function checkAmount(raw: string | undefined, unsafeNumber: boolean): { ok: boolean; reason: string } {
+  if (unsafeNumber) {
+    return {
+      ok: false,
+      reason: "amount was sent as a JSON number above 2^53; JSON.parse already rounded it — send a decimal string",
+    };
   }
-  return undefined;
-}
-
-function pickAccept(decoded: Record<string, unknown>): Record<string, unknown> | undefined {
-  const accepts = decoded["accepts"];
-  if (Array.isArray(accepts)) return asRecord(accepts[0]);
-  return asRecord(accepts);
-}
-
-function checkAmount(raw: string | undefined): { ok: boolean; reason: string } {
   if (raw === undefined) return { ok: false, reason: "no amount field found" };
   if (!/^\d+$/.test(raw)) {
     return { ok: false, reason: `amount must be a positive integer in atomic units, got "${raw}"` };
@@ -69,6 +56,11 @@ function checkAmount(raw: string | undefined): { ok: boolean; reason: string } {
 }
 
 export function checkChallenge(input: ChallengeInput): CheckResult[] {
+  // matchNetwork also guards this; checking here gives a clearer boundary error
+  // for callers of this library entry point.
+  if (!Object.hasOwn(KITE_NETWORKS, input.expectedNetwork)) {
+    throw new TypeError(`checkChallenge: unknown expectedNetwork "${String(input.expectedNetwork)}"`);
+  }
   const results: CheckResult[] = [];
 
   results.push(
@@ -134,7 +126,7 @@ export function checkChallenge(input: ChallengeInput): CheckResult[] {
     );
   }
 
-  const accept = pickAccept(envelope);
+  const accept = pickPaymentOption(envelope);
   if (accept === undefined) {
     results.push(fail("c2.scheme", "payment option found", "no `accepts` entry in the challenge"));
     results.push(skip("c2.network", "network matches", "no payment option to inspect"));
@@ -151,7 +143,7 @@ export function checkChallenge(input: ChallengeInput): CheckResult[] {
       : fail("c2.scheme", "scheme is exact", `expected scheme=exact, got ${JSON.stringify(scheme ?? null)}`, "critical"),
   );
 
-  const advertisedNetwork = accept["network"] ?? accept["chainId"] ?? accept["chain"];
+  const advertisedNetwork = pickRaw(accept, FIELD_ALIASES.network);
   const networkMatch = matchNetwork(advertisedNetwork, input.expectedNetwork);
   results.push(
     networkMatch.ok
@@ -166,7 +158,13 @@ export function checkChallenge(input: ChallengeInput): CheckResult[] {
   const asset = pickString(accept, FIELD_ALIASES.asset);
   if (asset === undefined) {
     results.push(
-      skip("c2.asset", "asset address is valid", "no asset field; settle-time asset cannot be checked", "warning"),
+      fail(
+        "c2.asset",
+        "asset address is valid",
+        "no asset field in the payment option; a client cannot build the EIP-712 verifyingContract without it",
+        "critical",
+        { fieldAliases: [...FIELD_ALIASES.asset] },
+      ),
     );
   } else if (isAddress(asset)) {
     results.push(pass("c2.asset", "asset address is valid", asset, "critical", { asset }));
@@ -184,7 +182,7 @@ export function checkChallenge(input: ChallengeInput): CheckResult[] {
   }
 
   const amountRaw = pickString(accept, FIELD_ALIASES.amount);
-  const amount = checkAmount(amountRaw);
+  const amount = checkAmount(amountRaw, unsafeIntegerFields(accept, FIELD_ALIASES.amount).length > 0);
   results.push(
     amount.ok
       ? pass("c2.amount", "amount is positive atomic integer", `${amountRaw ?? ""} (atomic units)`)

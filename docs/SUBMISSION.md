@@ -8,7 +8,7 @@
 |---|---|
 | 仓库链接 | `https://github.com/emptytouch/kite-x402-conformance` |
 | 许可证 | Apache-2.0 |
-| 当前版本 | `0.1.0` |
+| 当前版本 | `0.2.0` |
 | 首次公开日期 | _YYYY-MM-DD_ |
 | 本期新增 commit 区间 | `<first-sha>..<last-sha>`（`git log --oneline <range>`） |
 
@@ -26,8 +26,8 @@
 $ npm run check
 > tsc --noEmit          （无输出 = 通过）
 > vitest run
- Test Files  3 passed (3)
-      Tests  30 passed (30)
+ Test Files  5 passed (5)
+      Tests  100 passed (100)
 > tsc -p tsconfig.build.json
 ```
 
@@ -43,6 +43,10 @@ $ node dist/cli.js check http://localhost:8080/v1/echo
 $ DEMO_MODE=broken PORT=8081 npm run example
 $ node dist/cli.js check http://localhost:8081/v1/echo
 ... 1 passed, 1 failed, 1 skipped      # exit=1
+
+$ npm run example:pay > sig.txt                       # 对挑战真实签名（本地计算）
+$ node dist/cli.js authorize http://localhost:8080/v1/echo --payment-signature @sig.txt
+... 14 passed, 0 failed, 0 skipped     # exit=0
 ```
 
 如涉及真实 testnet 结果，另附 `docs/EVIDENCE.md` 中的对应行与交易链接。
@@ -51,12 +55,12 @@ $ node dist/cli.js check http://localhost:8081/v1/echo
 
 | 阶段 | 状态 | 证据 |
 |---|---|---|
-| ① 登记 PR | 未提交 / 已提交 / 已合并 | PR 链接 |
-| ② 生态映射生效 | 未确认 / 已生效 | developerreport 侧截图或链接 |
-| ③ Commit 抓取 | 未开始 / 已抓取 | 统计页面表现 |
-| ④ 开发者归因 | 未确认 / 已归属本人账号 | 归属页面 |
+| ① 登记 PR | **已提交（OPEN，CI 通过）**，截至 2026-11-18 尚未合并 | https://github.com/electric-capital/open-dev-data/pull/3153 |
+| ② 生态映射生效 | 未确认（依赖 ① 合并） | developerreport 侧截图或链接 |
+| ③ Commit 抓取 | 未开始（依赖 ②） | 统计页面表现 |
+| ④ 开发者归因 | 未确认（依赖 ②） | 归属页面 |
 
-> 仓库尚未登记时，本表前三栏写「未提交」，并在提交说明里附仓库链接与第 6 节的技术关联证据，由组织者核验后办理登记。
+> ① 的 PR 创建于 2026-11-17，`build` 检查 19 秒通过、无冲突、无 review。②–④ 尚未发生，不能提前写成「已生效」。
 
 ## 6. 技术关联证据（供核验）
 
@@ -66,7 +70,10 @@ $ node dist/cli.js check http://localhost:8081/v1/echo
 | 挑战网络字段校验 | `src/checks/c2-challenge.ts` 的 `c2.network` 断言 + 对应测试 |
 | x402 v2 头编解码 | `src/wire.ts` + `test/wire.test.ts` |
 | 收款地址 / 资产地址校验 | `src/checks/c2-challenge.ts` 的 `c2.asset`、`c2.pay-to`、`c2.pay-to-match` |
-| 依赖 | `package.json`：`viem` 用于地址校验与后续 EIP-712/3009，`zod` 用于载荷校验 |
+| Kite chainId 进入 EIP-712 域 | `src/eip712.ts` 的 `eip712DomainSeparator` + `test/eip712.test.ts` 的固定黄金值 |
+| EIP-3009 授权可恢复（离线 `ecrecover`） | `src/checks/c3-authorization.ts` 的 `c3.signature-recovery` + `test/c3-authorization.test.ts` |
+| 签名规范性（v ∈ {27,28}、低 s） | `src/eip712.ts` 的 `parseSignature65` + `c3.signature-format` / `c3.signature-low-s` |
+| 依赖 | `package.json`：`viem` 用于地址校验、EIP-712 编码与签名恢复，`zod` 用于载荷校验 |
 
 ## 7. 月度活跃台账（任务一另记）
 
