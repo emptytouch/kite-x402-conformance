@@ -13,34 +13,9 @@
 - `doctor` 环境自检（W4）
 - `--reporter=junit` 与退出码在 CI 模板中的示例（视需求）
 
-## [Unreleased]
-
-本轮对 `0.2.0` 工作树做了对抗性审查，以下均为构造输入后**实测复现**并已修复的问题，不是静态猜测。
-
-### Security
-
-- **ERC-6492 fail-open**：一个 65 字节垃圾签名，只要末尾 32 字节等于 ERC-6492 magic，就会让 `c3.signature-format` / `c3.signature-low-s` / `c3.signature-recovery` 三条断言全部 `skip`，`0 failed`、退出码 `0`。现在除 magic 尾缀外还要求 `parseErc6492Signature` 能解出非零 factory 与非空 calldata；伪造签名落回 `parseSignature65` 并判 critical 失败。
-- **`authorize` 缺少链绑定**：挑战是 `eip155:2366`、`--network testnet` 时，`c3.domain-config` 仍可用挑战自述的 chainId 组域并让恢复通过，报告却写着 `eip155:2368`。现在 domain 必须同时匹配 `--network`，否则 critical 失败且不跑恢复。
-
-### Fixed
-
-- **金额被静默取整**：`amount: 9007199254740993`（JSON 数字）在 `JSON.parse` 后变成 `9007199254740992`，C2 曾报 `pass` 并输出错误金额。`Number.isSafeInteger` 守门，超限字段改为明确失败并要求十进制字符串；chainId 与 `maxTimeoutSeconds` 同样处理。
-- **多选项误判**：客户端合法选择 `accepts[1]` 时，C3 拿它与 `accepts[0]` 比对并判 critical 失败。现在按 `payload.accepted` 选出匹配选项；与所有选项都不匹配时判「过期或外来报价」。
-- **自转付款误判**：`from === to` 被判 critical，但 facilitator 并不拒绝这种付款，违反「不发明规则」原则。降为 warning，并明确标注为工程建议；零地址仍为 critical。
-- **库入口参数**：`checkAuthorization` 对非法 `expectedNetwork` / `NaN` / 负数现在在入口抛 `TypeError`，而不是在断言中途崩溃。
-- 配置口径：`KITE_FACILITATOR_URL` 和 `KITE_ASSET_ADDRESS` 此前被文档描述为「已参与判定」，实际没有任何断言读取它们。现如实标注为 C4 预留；`KITE_RPC_URL` 则在 `networks` 命令里真正显示为当前网络的 rpc 覆盖值，并明确说明本版本不发起链上调用
-- 独立审查追加修复（均由构造输入复现）：
-
-  - `c2.asset` 在选项缺少 `asset` 时只报 `skip warning`，退出码仍可为 0；缺资产意味着客户端无法构造 `verifyingContract`，改为 critical fail
-  - `c3.accepted-binding` 在挑战与载荷两侧都没有 `network` 时，`null === null` 被当成一致而判 pass；现在两侧任一为空即记差异
-  - `network: ""` 会经 `??` 遮住后面有效的 `chainId` 别名，导致合法链被判错；新增 `pickRaw` 跳过空字符串
-  - `expectedNetwork` 用 `in` 判断，`"toString"` / `"constructor"` 等 `Object.prototype` 继承键能通过校验并让后续比较失真；改为 `Object.hasOwn`，并在 `matchNetwork`、`checkChallenge`、`checkAuthorization` 与 CLI 四处统一拦截
-
-- 测试 85 → 100（新增 15 个回归用例）。
-
 ## [0.2.0] - 2026-11-18
 
-第二个可运行版本：补上「客户签出来的付款能不能结算」这一半判定。仍然不发交易、不连 RPC。
+第二个可运行版本：补上「客户签出来的付款能不能结算」这一半判定。仍然不发交易、不连 RPC。当前定稿包含 100 个自动化测试；C3 与下方定稿前加固均落在 `85061d1`，未单独发布补丁版本。
 
 ### Added
 
@@ -51,7 +26,7 @@
 - **`examples/mock-payer.ts`**：对示例卖家的挑战真实签名并输出 `PAYMENT-SIGNATURE`，用于端到端演示（公开测试私钥，不连链）
 - **`src/checks/parse.ts`**：C2 与 C3 共用的字段别名读取，替代两份各自维护的实现
 - **`chainIdFromNetworkField`**：把 `eip155:2368` / `2368` / `"2368"` 统一转成数字 chainId 的唯一入口
-- 测试从 30 个增至 85 个（新增 C3 39 个、EIP-712 16 个）
+- 测试从 30 个增至 100 个（C3 新增 39 个、EIP-712 16 个、定稿前对抗性审查追加 15 个）
 
 ### Changed
 
@@ -60,6 +35,31 @@
 - `c3.window-span` 统计的是「从当前时刻起还剩多少可重放时间」（`validBefore - now`），不是 `validBefore - validAfter`。参考客户端固定发 `validAfter: "0"`，用差值会得到约 1.7e9 秒，没有任何判别力
 - JSON 输出字段：`url` → `target`，并新增 `command`。两个命令共用同一份结构
 - `examples/mock-seller.ts` 改为真实 v2 形状（`resource` 在顶层，`amount` / `maxTimeoutSeconds` / `extra` 在选项内），`extra.name` 改成 `"Demo USD"` 以免被误认为真实代币的域
+- 配置口径：`KITE_FACILITATOR_URL` 和 `KITE_ASSET_ADDRESS` 如实标注为 C4 预留；`KITE_RPC_URL` 在 `networks` 命令里显示为当前网络的 rpc 覆盖值，本版本不发起链上调用
+
+### 定稿前对抗性审查
+
+以下问题均在 `0.2.0` 定稿前用构造输入**实测复现**并修复，不是静态猜测；修复已包含在 `85061d1` 与 `0.2.0` 中。
+
+#### Security
+
+- **ERC-6492 fail-open**：一个 65 字节垃圾签名，只要末尾 32 字节等于 ERC-6492 magic，就会让 `c3.signature-format` / `c3.signature-low-s` / `c3.signature-recovery` 三条断言全部 `skip`，`0 failed`、退出码 `0`。现在除 magic 尾缀外还要求 `parseErc6492Signature` 能解出非零 factory 与非空 calldata；伪造签名落回 `parseSignature65` 并判 critical 失败。
+- **`authorize` 缺少链绑定**：挑战是 `eip155:2366`、`--network testnet` 时，`c3.domain-config` 仍可用挑战自述的 chainId 组域并让恢复通过，报告却写着 `eip155:2368`。现在 domain 必须同时匹配 `--network`，否则 critical 失败且不跑恢复。
+
+#### Fixed
+
+- **金额被静默取整**：`amount: 9007199254740993`（JSON 数字）在 `JSON.parse` 后变成 `9007199254740992`，C2 曾报 `pass` 并输出错误金额。`Number.isSafeInteger` 守门，超限字段改为明确失败并要求十进制字符串；chainId 与 `maxTimeoutSeconds` 同样处理。
+- **多选项误判**：客户端合法选择 `accepts[1]` 时，C3 拿它与 `accepts[0]` 比对并判 critical 失败。现在按 `payload.accepted` 选出匹配选项；与所有选项都不匹配时判「过期或外来报价」。
+- **自转付款误判**：`from === to` 被判 critical，但 facilitator 并不拒绝这种付款，违反「不发明规则」原则。降为 warning，并明确标注为工程建议；零地址仍为 critical。
+- **库入口参数**：`checkAuthorization` 对非法 `expectedNetwork` / `NaN` / 负数现在在入口抛 `TypeError`，而不是在断言中途崩溃。
+- 独立审查追加修复（均由构造输入复现）：
+
+  - `c2.asset` 在选项缺少 `asset` 时只报 `skip warning`，退出码仍可为 0；缺资产意味着客户端无法构造 `verifyingContract`，改为 critical fail
+  - `c3.accepted-binding` 在挑战与载荷两侧都没有 `network` 时，`null === null` 被当成一致而判 pass；现在两侧任一为空即记差异
+  - `network: ""` 会经 `??` 遮住后面有效的 `chainId` 别名，导致合法链被判错；新增 `pickRaw` 跳过空字符串
+  - `expectedNetwork` 用 `in` 判断，`"toString"` / `"constructor"` 等 `Object.prototype` 继承键能通过校验并让后续比较失真；改为 `Object.hasOwn`，并在 `matchNetwork`、`checkChallenge`、`checkAuthorization` 与 CLI 四处统一拦截
+
+- 测试 85 → 100（新增 15 个回归用例；最终 `0.2.0` 为 100）
 
 ### Notes
 

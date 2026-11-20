@@ -183,7 +183,7 @@ node dist/cli.js decode "$PAYMENT_REQUIRED_HEADER"
 
 ```bash
 npm run example                                  # 终端 1：合成卖家（:8080）
-npm run example:pay > sig.txt                    # 终端 2：对挑战真实签名，输出头部值
+npm run example:pay --silent > sig.txt           # 终端 2：--silent 避免 npm 横幅写进签名文件
 node dist/cli.js authorize http://localhost:8080/v1/echo --payment-signature @sig.txt
 ```
 
