@@ -108,7 +108,13 @@ node dist/cli.js authorize http://localhost:8080/v1/echo --payment-signature @si
 
 本文件只记任务二。任务一的活跃天数按实际开发日期汇总，不拿 PR 合并日替代；两者不要混在同一张表里。
 
-## 8. 提交前自查
+## 8. C4 判定层（0.2.0 之后的增量）
+
+上表与测试输出记录的是 `0.2.0` 定稿时的状态。其后新增 C4 结算时序**判定层**（`src/checks/c4-settlement-order.ts`，12 条断言 + 24 个测试），测试基线由 100 增至 124。此增量尚未发布、尚未单独 commit，不计入上表 `0.2.0` 的 commit 区间。
+
+需要如实区分：C4 是纯判定函数，输入为调用方注入的四个探针观测；探针执行层与 CLI 子命令均未实现，**没有** live 结算证据。它不改变 `docs/EVIDENCE.md` 的「尚无 live 记录」结论。规格见 `docs/CHECKS.md` 的 C4 章节，边界见 `docs/LIMITATIONS.md`。
+
+## 9. 提交前自查
 
 - [x] `npm run check` 全绿，输出已附
 - [x] commit 作者为本人账号（`git log --format='%an <%ae>'` 全部一致）

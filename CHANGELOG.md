@@ -4,9 +4,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- **C4 判定层**（`src/checks/c4-settlement-order.ts`）：`checkSettlementOrder({ observations })`，12 条 `c4.*` 断言，按四个探针观测判定结算时序——无签名返回 402 且不转发不结算、错误签名返回 402 且不转发不结算、上游 4xx/5xx 不结算、上游 2xx 必须结算并返回 200 与含合法 tx hash 的 `PAYMENT-RESPONSE`。每条断言对应一个真实亏损场景，映射见 `docs/CHECKS.md`
+- **收据校验**：`PAYMENT-RESPONSE` 经 `decodeHeaderValue` 解码，接受顶层或 `receipt` / `settlement` 嵌套下的 `txHash` / `transactionHash` / `tx` / `hash`，要求 `/^0x[0-9a-fA-F]{64}$/`；空对象、占位字符串、格式错误一律 critical 失败，不 skip
+- **fail-closed 输入校验**：探针缺失、重复、字段类型非法（含 `settled: "false"` 字符串、越界状态码）→ `c4.probes` 失败，其余 11 条全部 skip；上游失败探针未触达上游时 `no-settle` skip（不是 pass）；无签名/错误签名探针即使被转发，其 `no-settle` 仍照常判定
+- 测试从 100 个增至 124 个（`test/c4-settlement-order.test.ts` 新增 24 个：正例 1、时序与收据反例 13、skip 与输入边界 10）
+- 定稿前对抗性审查（均由构造输入实测复现并加回归测试）：
+
+  - `upstreamError` 探针返回 2xx/3xx 时曾把 `no-settle` 判为 pass（失败场景根本没构造出来，绿色结论是空洞的），现要求 4xx/5xx 前置
+  - 非字符串 `PAYMENT-RESPONSE` 头值会让 `raw.trim()` 抛异常而非给出结论，现改为输入校验失败
+  - 矛盾观测曾给出绿灯：`settled:false, settlementStatus:200`（声称没结算却有扣款状态）、`settled:true, settlementStatus:500`（结算失败却声称成功）、`upstreamCalled:false, upstreamStatus:200`（声称没转发却拿到上游状态）。现 `c4.probes` 校验布尔量与配套状态码的一致性，矛盾输入整体失败
+  - 收据别名容忍与 parse.ts 对齐：空串跳过、只读自有属性（防原型污染）、`receipt` / `settlement` 两个包装独立解析；非空但格式错误的 hash 仍是明确失败，不被后续别名掩盖
+  - 上游返回 2xx/3xx 时的 skip 原因文本原写「upstream was never called」，与事实相反，现报告实际 called/status
+
+### 边界说明
+
+C4 只做判定：四探针的执行与 `upstreamCalled` / `settled` 观测采集属未来 runner 层，本版本**没有** CLI 子命令、不发请求、不产生 live 证据。把服务端自报头部当观测会使结论可被伪造；观测源可信度不在判定层能力内。见 `docs/LIMITATIONS.md` 与 `docs/ARCHITECTURE.md`。
+
 ### Planned
 
-- C4：结算时序检查——无签名不转发、上游 4xx/5xx 不结算、成功返回收据（W2）
+- C4 探针执行层（mock upstream + mock facilitator）与 CLI 子命令，把观测接入真实服务
 - C5：重放与幂等检查（W3）
 - C1：与 `service.yaml` / `.well-known/x402` 的清单一致性比对（W3）
 - `--pay` 实盘模式与 `docs/EVIDENCE.md` 首条 live 记录（W4）

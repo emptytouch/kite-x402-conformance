@@ -9,7 +9,7 @@
 | C1 | 清单一致性（`service.yaml` / `.well-known/x402` vs 实测） | — | 未实现 | W3 |
 | **C2** | **402 挑战结构** | **10** | **已实现** | W1 ✅ |
 | **C3** | **授权可构造（EIP-712 域 + EIP-3009 可恢复签名）** | **14** | **已实现** | W2 ✅ |
-| C4 | 结算时序（无签名不转发、上游失败不结算、成功返收据） | — | 未实现 | W2 |
+| **C4** | **结算时序（无签名不转发、上游失败不结算、成功返收据）** | **12** | **已实现** | W2 ✅ |
 | C5 | 重放与幂等 | — | 未实现 | W3 |
 
 ## C2 · 402 挑战结构
@@ -145,6 +145,95 @@ viem 的 `parseSignature` 接受结尾字节为 `0` / `1`（把它当作 `yParit
 | 挑战的 `extra.name` / `version` 是否与链上 `name()` / `version()` 一致 | 需 RPC；只能验「自洽」（签名按挑战域恢复成功） | 同上 |
 | 智能合约钱包（ERC-1271 / ERC-6492）的签名有效性 | 需账户实现，且低 s 规则对已部署合约账户有豁免 | 不建模 |
 | 上游服务是否真的交付内容 | 与本工具定位无关 | 不做 |
+
+## C4 · 结算时序
+
+C2 问「收费要求写对了吗」，C3 问「客户签出来的付款能不能结算」。C4 问第三件、也是唯一直接涉及钱的问题：**服务端把结算放在了正确的时点吗**。它不解析签名，也不读链，只依据四个探针的观测结果判断时序。
+
+### 依据：每条断言对应一个真实的亏损场景
+
+依据来自方案稿 §2 的两条借鉴：`axum`「只有上游返回 `<400` 才结算」与 `hono`「结算后再返回内容」。把它展开成四种请求，每种对应一个可直接量化损失的失败模式：
+
+| 探针 | 期望时序 | 违反时的后果 |
+|---|---|---|
+| 无签名请求 | 返回 402，上游不被调用，不结算 | 不付钱就拿到付费内容，收入直接损失 |
+| 错误签名请求 | 返回 402，上游不被调用，不结算 | 伪造授权也能拿到内容或被扣款 |
+| 上游 4xx/5xx | 上游被调用，但**不结算** | 用户付了钱却没拿到内容（白扣钱） |
+| 上游 2xx | 上游被调用、结算成功、返回 200 且 `PAYMENT-RESPONSE` 含 tx hash | 内容白送，或付了款却拿不到可对账的凭据 |
+
+### 输入：runner 注入的可信观测，不是客户端自说自话
+
+关键限制：`upstreamCalled`、`settled` 这两项**无法从单个客户端响应推出**——服务端可以对着客户端说「结算成功」，背地里既没结算也没转发。所以 C4 断言本身不发请求、不读环境，输入是 runner / mock 环境注入的四个探针观测：
+
+```ts
+interface ProbeObservation {
+  readonly probe: "unsigned" | "invalidSignature" | "upstreamError" | "upstreamSuccess";
+  readonly responseStatus: number;                       // 服务端给客户端的状态码
+  readonly responseHeaders: Record<string, string>;      // 含 PAYMENT-RESPONSE
+  readonly upstreamCalled: boolean;                      // 上游是否真的收到请求
+  readonly upstreamStatus: number | undefined;           // 上游状态码，未调用时为 undefined
+  readonly settled: boolean;                             // 结算是否真的发生
+  readonly settlementStatus: number | undefined;         // 结算接口状态，未结算时为 undefined
+}
+```
+
+`responseHeaders` 的值必须是字符串；非字符串会让 `c4.probes` 输入校验失败，而不是让解码过程抛异常。
+
+**跨字段一致性也是输入校验的一部分**：布尔量与配套状态码必须自洽，否则不能当真值使用——让服务端自报 `settled:false, settlementStatus:200` 却判 `no-settle` 为 pass，正是 C4 要防的「没付款也扣钱」。以下四种矛盾组合在 `c4.probes` 阶段失败，其余断言全部 skip：
+
+- `settled === true` 但 `settlementStatus` 缺失，或不是 2xx（结算接口返回失败却声称结算成功）；
+- `settled === false` 但 `settlementStatus` 有值（声称没结算却有结算状态）；
+- `upstreamCalled === true` 但 `upstreamStatus` 缺失；
+- `upstreamCalled === false` 但 `upstreamStatus` 有值。
+
+若 runner 的上游确实「调了但没拿到状态码」，它应把 `upstreamCalled` 记为 `false`（从 C4 的视角，没有可判定状态码的上游调用不产生可判定观测）。五个探针语义字段自洽是 `c4.probes` 的契约；放宽它等于把判定建立在自相矛盾的输入上。
+
+这四个观测必须由**能观察到上游与结算接口的那一层**产生（自建 mock upstream + mock facilitator，或接入了真实遥测的 runner）。只拿一个 URL 跑 `fetch` 无法填满这个输入——因此 C4 目前是**判定层纯函数**，CLI 没有对应的实盘子命令；把它接到真实服务属于未来 runner 层的工作，见 `docs/LIMITATIONS.md`。把观测当真值而非让服务端自报，是这条检查不被骗过的前提。
+
+### 断言表（12 条）
+
+| 断言 id | 断言 | 级别 | 判定要点 |
+|---|---|---|---|
+| `c4.probes` | 四个探针观测齐全且字段类型合法 | critical | 前置条件；缺任一探针即失败，其余断言 skip |
+| `c4.unsigned.status` | 无签名请求返回 402 | critical | 服务端必须索要付款，而不是 200/5xx |
+| `c4.unsigned.no-forward` | 无签名请求未触达上游 | critical | `upstreamCalled === false` |
+| `c4.unsigned.no-settle` | 无签名请求未结算 | critical | `settled === false`；防止「没付款也扣钱」 |
+| `c4.invalid-signature.status` | 错误签名返回 402 | critical | 验证失败统一 402，不是 5xx（与 axum 错误语义一致） |
+| `c4.invalid-signature.no-forward` | 错误签名未触达上游 | critical | `upstreamCalled === false` |
+| `c4.invalid-signature.no-settle` | 错误签名未结算 | critical | `settled === false` |
+| `c4.upstream-error.forwarded` | 上游失败探针确实触达一个 4xx/5xx 上游 | critical | 前置：没触达失败上游就无法判断「失败时是否结算」；上游返回 2xx/3xx 说明失败场景没构造出来 |
+| `c4.upstream-error.no-settle` | 上游 4xx/5xx 时不结算 | critical | 核心断言：`upstreamStatus >= 400 && settled === false` |
+| `c4.upstream-success.forwarded` | 上游成功探针确实触达上游且返回 2xx | critical | 前置：`upstreamStatus ∈ [200,300)` |
+| `c4.upstream-success.settled` | 上游 2xx 时确实结算 | critical | `settled === true`；内容不能白送 |
+| `c4.upstream-success.receipt` | 返回 200 且 `PAYMENT-RESPONSE` 可解码、含合法 tx hash | critical | 收据是唯一可对账凭据；hash 必须是 `0x` + 64 hex |
+
+### 为什么把「转发」和「结算」拆成两条
+
+它们在不同环节失守，修法不同：`no-forward` 失败说明验证中间件放行得太早（改 middleware）；`no-settle` 失败说明结算被调用在错误分支上（改 settle 触发条件）。合成一条断言会让报告只说「时序错了」，无法定位。
+
+### 收据为什么必须含 tx hash
+
+`PAYMENT-RESPONSE` 存在但字段是空对象、占位字符串或格式错误的 hash，看起来像「拿到了收据」，实际无法在浏览器打开、也无法写进 `docs/EVIDENCE.md`。C4 用 `decodeHeaderValue` 解码后读取 `txHash` / `transactionHash` / `tx` / `hash` 别名（见 `src/checks/parse.ts` 的字段名容忍策略），并要求 `/^0x[0-9a-fA-F]{64}$/`。解析失败、字段缺失、格式错误一律 critical 失败，不 skip。
+
+别名读取遵循 parse.ts 的两条既有规则：**空串跳过**（所以 `txHash: ""` 不遮住后面的 `transactionHash: <valid>`）；**只读自有属性**（`Object.hasOwn`，进程级原型污染不能造出假 hash）。`receipt` 与 `settlement` 两个包装各自独立解析，一个非空字符串但非对象的包装不会吞掉另一个里的合法 hash。注意「空串跳过」与「非空但格式错误即失败」是两条不同规则：后者是真实发现，不能被后续别名掩盖。
+
+### 前置失败时的 skip 规则
+
+- 四个探针任一缺失或字段非法 → `c4.probes` 失败，其余 11 条全部 skip。
+- 上游失败探针没触达上游、或上游返回的不是 4xx/5xx（2xx/3xx）→ `c4.upstream-error.forwarded` 失败，`c4.upstream-error.no-settle` skip（失败场景没构造出来时，`settled === false` 是空洞的，不能当成「正确没结算」）。
+- 上游成功探针没触达或未返回 2xx → `c4.upstream-success.forwarded` 失败，`c4.upstream-success.settled` 与 `receipt` skip。
+- 无签名 / 错误签名探针里 `upstreamCalled === true` 时，`no-settle` 仍然照常判断，不因前置失败而 skip——「既转发又结算」比「只转发」更严重，需要同时出现在报告里。
+
+skip 恒不等于通过：报告底部的提示与 C2/C3 一致。
+
+### C4 明确不检查的东西
+
+| 项 | 原因 | 归属 |
+|---|---|---|
+| 签名本身是否有效 | 离线验签是 C3 的职责 | C3 |
+| 链上 tx 是否真的成功落块 | 需要 RPC 读收据 | 未来 runner 的 live 模式 |
+| `nonce` 是否被二次结算 | 需要跨请求状态 | C5 |
+| 服务端是否谎报 `upstreamCalled` / `settled` | 观测源的可信度是 runner 的责任，判定层无法自证 | runner / mock 环境 |
 
 ## 待确认项（写在明面上，不猜）
 

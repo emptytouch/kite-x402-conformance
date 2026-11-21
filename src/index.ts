@@ -6,3 +6,4 @@ export * from "./checks/types.js";
 export * from "./checks/parse.js";
 export * from "./checks/c2-challenge.js";
 export * from "./checks/c3-authorization.js";
+export * from "./checks/c4-settlement-order.js";

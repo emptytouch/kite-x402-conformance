@@ -17,10 +17,12 @@ kite-x402-conformance/
 │     ├─ types.ts             # CheckResult 模型与 pass/fail/skip 构造器
 │     ├─ parse.ts             # C2/C3 共用的字段别名读取
 │     ├─ c2-challenge.ts      # C2：402 挑战结构（10 条断言）
-│     └─ c3-authorization.ts  # C3：授权可构造（14 条断言）
+│     ├─ c3-authorization.ts  # C3：授权可构造（14 条断言）
+│     └─ c4-settlement-order.ts # C4：结算时序（12 条断言，输入为注入的四探针观测）
 ├─ test/
 │  ├─ c2-challenge.test.ts    # C2 正例、反例、别名、边界
 │  ├─ c3-authorization.test.ts# C3 正例、拒付路径、窗口边界、归因
+│  ├─ c4-settlement-order.test.ts # C4 四探针正例、时序反例、收据与 skip 边界
 │  ├─ eip712.test.ts          # 手写编码与 viem 逐字节比对、黄金值、签名解析
 │  ├─ wire.test.ts            # 编解码与畸形输入
 │  └─ networks.test.ts        # 网络归一化与确证标记
@@ -45,6 +47,7 @@ kite-x402-conformance/
 | `checks/types.ts` | 统一结果模型（`pass` / `fail` / `skip`）与严重级别 | — |
 | `checks/c2-challenge.ts` | C2 的 10 条断言，纯函数，输入为状态码 + headers | 网络 IO、报告输出 |
 | `checks/c3-authorization.ts` | C3 的 14 条断言，输入为两个头值 + 评估时刻；签名恢复是 CPU 计算，不联网 | 网络 IO、报告输出、链上状态 |
+| `checks/c4-settlement-order.ts` | C4 的 12 条时序断言，输入为四个探针的可信观测；收据解码是纯计算 | 网络 IO、报告输出、探针采集（属 runner） |
 | `checks/parse.ts` | 字段别名读取（`amount`/`maxAmountRequired` 等），一份规则两处复用 | 判断合规性 |
 | `eip712.ts` | 手写 EIP-712 域分隔符与结构散列、EIP-3009 摘要、65 字节签名解析（含 v 与低 s 判定） | 决定断言级别 |
 
@@ -103,6 +106,23 @@ kite-x402-conformance/
 ```
 
 `c3.signature-recovery` 是唯一会做多次椭圆曲线运算的断言：失败时它会把 `version` 与 `chainId` 的各种组合重新算一遍，用来判断「客户到底对着哪个域签的」。这段计算在 `authorize` 里是可观测的（报告耗时约毫秒级），不构成性能问题。
+
+## C4：判定层，尚无子命令
+
+C4 与 C2/C3 的一个关键差别：它的输入无法从一次客户端响应推出。`upstreamCalled` 与 `settled` 是服务端内部事件，服务端可以在自己的响应头里声称「已结算」而实际什么都没做。因此 `checkSettlementOrder({ observations })` 只做判定，四个探针的执行与观测采集属于未来的 runner 层：
+
+```
+runner（未实现）                         checks/c4-settlement-order.ts（本版本）
+  无签名请求 ─┐
+  错签名请求 ─┤
+  上游 4xx   ─┼─→ ProbeObservation[] ──→ checkSettlementOrder() ──→ 12 条 CheckResult
+  上游 2xx   ─┘    （含 upstreamCalled /        （纯函数、不发请求、不读环境）
+                    settled / 响应头 / 状态码）
+```
+
+观测源必须是能看见上游与 facilitator 的那一层（自建 mock，或接了遥测的 runner）。把服务端自报的头部当真值会让 C4 被伪造的服务端骗过；这一点写在 `docs/LIMITATIONS.md`，判定层不假设观测不可信。
+
+因为还没有探针执行层，`cli.ts` **没有** C4 子命令，也没有对应的 live 证据。当前只能通过库入口 `import { checkSettlementOrder } from "kite-x402-conformance"` 传入夹具观测调用。把 C4 接进 CLI 需要先实现 `probes/` 层，这不改变判定函数的接口。
 
 ## 设计决策
 
