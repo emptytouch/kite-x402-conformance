@@ -22,10 +22,17 @@
 
 C4 只做判定：四探针的执行与 `upstreamCalled` / `settled` 观测采集属未来 runner 层，本版本**没有** CLI 子命令、不发请求、不产生 live 证据。把服务端自报头部当观测会使结论可被伪造；观测源可信度不在判定层能力内。见 `docs/LIMITATIONS.md` 与 `docs/ARCHITECTURE.md`。
 
+- **C5 判定层**（`src/checks/c5-replay-idempotency.ts`）：`checkReplayIdempotency({ scenarios })`，13 条 `c5.*` 断言，按三场景的两尝试观测判定重复扣款——同签名换键重放、同键重试、同 nonce 重新签名。三个场景各有 `first-settled` 前置：首次没结算时「未二次扣款」是空洞的，不能算通过
+- **C5 fail-closed 输入校验**：`settled` / `upstreamCalled` / `cacheHit` 与配套状态码必须自洽；`cacheHit` 同时 `settled` 或转发上游的观测判为输入矛盾（不是 verdict）；必需字段只读自有属性，防止原型污染供给扣款判定；两个合法可为 `undefined` 的状态字段允许键缺失，使观测经 JSON 往返后仍有效
+- 测试从 124 个增至 155 个（`test/c5-replay-idempotency.test.ts` 新增 31 个）
+
+### 边界说明
+
+C5 与 C4 同为判定层：三场景的探针执行、`settled` / `cacheHit` / `upstreamCalled` 观测采集、链上 `authorizationState` 核验都属未来 runner 层，本版本**没有** CLI 子命令、不发请求、不产生 live 证据。见 `docs/LIMITATIONS.md`。
+
 ### Planned
 
-- C4 探针执行层（mock upstream + mock facilitator）与 CLI 子命令，把观测接入真实服务
-- C5：重放与幂等检查（W3）
+- C4 / C5 探针执行层（mock upstream + mock facilitator）与 CLI 子命令，把观测接入真实服务
 - C1：与 `service.yaml` / `.well-known/x402` 的清单一致性比对（W3）
 - `--pay` 实盘模式与 `docs/EVIDENCE.md` 首条 live 记录（W4）
 - `doctor` 环境自检（W4）

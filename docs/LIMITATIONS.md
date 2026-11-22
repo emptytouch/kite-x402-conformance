@@ -13,7 +13,7 @@
 | JSON 输出（stdout） | ✅ 已实现 | 尚未写文件、未出 JUnit |
 | C1 清单一致性 | ❌ 未实现 | 计划 W3 |
 | C4 结算时序（判定层） | ✅ 已实现 | `checkSettlementOrder` 纯函数，12 条断言；输入是 runner 注入的四探针观测。**没有 CLI 子命令、不发请求、不产生观测** |
-| C5 重放与幂等 | ❌ 未实现 | 计划 W3 |
+| C5 重放与幂等（判定层） | ✅ 已实现 | `checkReplayIdempotency` 纯函数，13 条断言；输入是 runner 注入的三场景两尝试观测。**没有 CLI 子命令、不发请求、不产生观测** |
 | `doctor` 环境自检 | ❌ 未实现 | 计划 W4 |
 | `--pay` 实盘模式 | ❌ 未实现 | 私钥变量已预留，当前版本**没有任何代码读取它** |
 | `probes/`（周期探测）、`reporters/`（JUnit/SARIF） | ❌ 未实现 | 仅规划，未落空壳代码 |
@@ -60,6 +60,7 @@
 4. **不做界面**：本期是 CLI 工具；`probes/` 若将来需要看板另立项目。
 5. **C3 不查链上事实**：`nonce` 是否已用、余额是否够、代币是否支持 EIP-3009、挑战的 `extra.name/version` 是否与链上 `name()`/`version()` 一致——这四项都需要 RPC，留给 C4/C5 的实盘范围。C3 的结论边界是「载荷与挑战自洽」。
 5. **C4 不采集观测**：它只判定注入的四探针观测是否合规；搭建 mock upstream / mock facilitator 或接入真实遥测以产生这些观测，属未来 runner 层，本版本未实现。
+6. **C5 不采集观测、不验证 nonce 的链上状态**：它只判定三次重复提交（同签名换键、同键重试、同 nonce 重签）的两尝试观测是否合规。`settled` / `upstreamCalled` / `cacheHit` 都由 runner 注入；服务端自报这些值会使结论可被伪造，观测源可信度不在判定层能力内。链上 `authorizationState` 的核验属未来 live 模式。
 6. **不替代 explorer**：目录、协议演示、只读诊断由 `kite-x402-explorer` 负责；本项目只做判定。
 
 ## 来源与原创性

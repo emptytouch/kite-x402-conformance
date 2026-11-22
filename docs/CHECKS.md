@@ -10,7 +10,7 @@
 | **C2** | **402 挑战结构** | **10** | **已实现** | W1 ✅ |
 | **C3** | **授权可构造（EIP-712 域 + EIP-3009 可恢复签名）** | **14** | **已实现** | W2 ✅ |
 | **C4** | **结算时序（无签名不转发、上游失败不结算、成功返收据）** | **12** | **已实现** | W2 ✅ |
-| C5 | 重放与幂等 | — | 未实现 | W3 |
+| **C5** | **重放与幂等（同签名 / 同键 / 换键绕过）** | **13** | **已实现** | **W3 ✅** |
 
 ## C2 · 402 挑战结构
 
@@ -234,6 +234,97 @@ skip 恒不等于通过：报告底部的提示与 C2/C3 一致。
 | 链上 tx 是否真的成功落块 | 需要 RPC 读收据 | 未来 runner 的 live 模式 |
 | `nonce` 是否被二次结算 | 需要跨请求状态 | C5 |
 | 服务端是否谎报 `upstreamCalled` / `settled` | 观测源的可信度是 runner 的责任，判定层无法自证 | runner / mock 环境 |
+
+## C5 · 重放与幂等
+
+C4 问「一次请求里的结算时点对不对」。C5 问第四件、也是直接影响付款人钱包的问题：**同一笔付款被提交两次时，会不会扣两次钱**。它不是「请求去重」的性能检查，而是 nonce 与 Idempotency-Key 两道防线的有效性检查。
+
+### 依据：三条会被真实扣款的重复路径
+
+| 探针 | 请求关系 | 正确行为 | 违反后的后果 |
+|---|---|---|---|
+| `nonceReplay` | 同一 `PAYMENT-SIGNATURE` 提交两次，第二次带**新**的 `Idempotency-Key` | 第二次 402，不结算 | 只靠幂等键去重的服务会在换 key 后二次扣款；这是最常见的假幂等 |
+| `idempotencyKey` | 同一 key、同一载荷重试两次（网络超时重发的典型形态） | 第二次返回缓存结果，不结算、不转发 | 客户端重试一次就被扣两次，或拿到与首次不同的内容无法对账 |
+| `nonceReuse` | 同一 authorization.nonce 重新签一条消息后提交（绕过「签名字节相同」的检查） | 第二次 402，不结算 | 只按签名字符串去重的实现会被重新签名绕过，链上 nonce 才是最终防线 |
+
+注意 `nonceReplay` 与 `nonceReuse` 的区别：前者要求「同一签名字节」，后者要求「同一 nonce 但签名不同」。只做前者会让「重新签名 + 换 nonce 之外的字段」溜过去；只做后者无法证明签名级去重。两条独立存在，不是重复检查。
+
+### 输入：runner 注入的两次尝试观测
+
+与 C4 相同，`settled` / `upstreamCalled` / `cacheHit` **无法从单个客户端响应推出**，必须由能看到 facilitator、上游与缓存的那一层注入。C5 是纯函数：不发请求、不读环境、不读时钟。
+
+```ts
+interface ReplayAttempt {
+  readonly responseStatus: number;                    // 该次尝试返回客户端的状态
+  readonly responseHeaders: Record<string, string>;   // 含 PAYMENT-RESPONSE
+  readonly responseBodyHash: string;                  // 响应体的稳定摘要，用于比对缓存结果
+  readonly settled: boolean;                          // 该次尝试是否真的结算
+  readonly settlementStatus: number | undefined;
+  readonly upstreamCalled: boolean;
+  readonly upstreamStatus: number | undefined;
+  readonly cacheHit: boolean;                         // 该次尝试是否命中服务端幂等缓存
+}
+
+interface ReplayScenarioObservation {
+  readonly scenario: "nonceReplay" | "idempotencyKey" | "nonceReuse";
+  readonly first: ReplayAttempt;
+  readonly second: ReplayAttempt;
+}
+```
+
+`responseBodyHash` 由 runner 计算，检查器只比对是否相等，因此摘要算法由 runner 决定（如 sha256）。**检查器不比对原文**：一是避免把大 payload 塞进观测，二是判定层不负责校验摘要正确性——那是 runner 的契约。
+
+### 跨字段一致性
+
+与 C4 相同，布尔量与配套状态码必须自洽，否则不是可用观测：
+
+- `settled === true` ↔ `settlementStatus` 存在且为 2xx；
+- `upstreamCalled === true` ↔ `upstreamStatus` 存在；
+- `cacheHit === true` 时 `settled` 必须为 `false`，且 `upstreamCalled` 必须为 `false`——缓存命中却重新结算或重新转发，本身就是被测缺陷，不是可接受的观测；
+- 两个 `responseHeaders` 的值必须是字符串，`responseBodyHash` 必须是非空字符串。
+
+`cacheHit === true && settled === true` 被判为**输入非法**而不是直接判 c5 断言失败：这种组合说明 runner 的观测自相矛盾，此时任何结论都不可信。
+
+### 断言表（13 条）
+
+每条都以「重复提交时是否会亏钱」为存在理由。三个场景各有自己的 `first-settled` 前置：首次没结算成功时，该场景的「未二次结算」是空洞的——不能把「根本没扣过款」当成「成功阻止了重复扣款」。
+
+| 断言 id | 断言 | 级别 | 为什么它防止亏损 |
+|---|---|---|---|
+| `c5.scenarios` | 三个场景齐全、字段类型合法、跨字段自洽 | critical | 前置；无有效观测时任何 pass 都是空洞的 |
+| `c5.nonce-replay.first-settled` | 首次结算成功 | critical | 否则「未二次结算」没有意义 |
+| `c5.nonce-replay.no-rebill` | 第二次未结算 | critical | **核心**：换 key 重放不得二次扣款 |
+| `c5.nonce-replay.rejected` | 第二次返回 402 | critical | 不能让无效签名拿到付费内容 |
+| `c5.nonce-replay.no-forward` | 第二次未触达上游 | critical | 验证中间件不得在无效签名时放行 |
+| `c5.idempotency.first-settled` | 首次结算成功 | critical | 否则缓存命中检查没有意义 |
+| `c5.idempotency.cached` | 第二次 `cacheHit === true` | critical | 未命中缓存说明去重失效，重试会二次执行 |
+| `c5.idempotency.no-rebill` | 第二次未结算 | critical | 同 key 重试不得二次扣款 |
+| `c5.idempotency.same-result` | 第二次状态码与 bodyHash 与首次一致，且收据 tx hash 相同 | critical | 内容或收据不一致时，客户端无法对账，也无法判断钱花到哪 |
+| `c5.idempotency.no-forward` | 第二次未触达上游 | critical | 缓存命中仍调上游，会产生重复副作用 |
+| `c5.nonce-reuse.first-settled` | 首次授权结算成功 | critical | 否则「未二次结算」没有意义，会出现全套绿灯却什么都没验证 |
+| `c5.nonce-reuse.no-rebill` | 重新签名的第二次未结算 | critical | nonce 是链上去重的最终依据，不能靠签名字节去重 |
+| `c5.nonce-reuse.rejected` | 重新签名的第二次返回 402 | critical | 重新签名不等于重新授权 |
+
+`same-result` 复用 C4 的收据读取规则：解码 `PAYMENT-RESPONSE`，按 `txHash` / `transactionHash` / `tx` / `hash` 别名读取，空串跳过、非空但格式错误即失败、只读自有属性。若首次没有收据，该断言失败而不是 skip——结算成功却不给收据本身就无法对账。
+
+### skip 规则
+
+- 三个场景任一缺失、重复或字段非法 → `c5.scenarios` 失败，其余 12 条全部 skip。
+- 某场景首次未结算 → 该场景的 `first-settled` 失败；**该场景其余断言仍照常判断**（二次结算比「没结算成功」更严重，需要同时出现在报告里），不因前置失败而 skip。这与 C4 的 unsigned/invalid-signature 探针处理一致。
+- `idempotencyKey` 场景首次无有效收据 → `same-result` 失败，`cached` / `no-rebill` / `no-forward` 仍照常判断。
+- 某次尝试返回 402 时，该场景的 `no-rebill` 与 `no-forward` 照常判断——服务端可能先扣款再返回错误，只报「正确拒绝了」会漏掉真实扣款。
+
+skip 恒不等于通过。
+
+### C5 明确不检查的东西
+
+| 项 | 原因 | 归属 |
+|---|---|---|
+| nonce 在链上是否真的未消费 | 需要 `authorizationState(from, nonce)` RPC | 未来 runner 的 live 模式 |
+| 幂等缓存的 TTL / 容量 / 淘汰策略 | 属于性能与配置，不是「会不会扣两次钱」 | 服务端自身测试 |
+| 并发请求下的竞态去重 | 需要同时发多个请求的时序控制 | 未来 runner |
+| 服务端自报 `settled` / `cacheHit` 是否真实 | 观测源可信度是 runner 的责任 | runner / mock 环境 |
+| 收据 tx hash 对应的链上交易是否成功 | 需要读链 | 未来 runner 的 live 模式 |
 
 ## 待确认项（写在明面上，不猜）
 

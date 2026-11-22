@@ -124,6 +124,20 @@ runner（未实现）                         checks/c4-settlement-order.ts（�
 
 因为还没有探针执行层，`cli.ts` **没有** C4 子命令，也没有对应的 live 证据。当前只能通过库入口 `import { checkSettlementOrder } from "kite-x402-conformance"` 传入夹具观测调用。把 C4 接进 CLI 需要先实现 `probes/` 层，这不改变判定函数的接口。
 
+## C5：同为判定层，覆盖三次重复提交
+
+C5 和 C4 面对同一个限制：`settled` / `upstreamCalled` / `cacheHit` 都是服务端内部事件，客户端响应无法证明。所以 `checkReplayIdempotency({ scenarios })` 也是纯函数，输入由 runner 注入：
+
+```
+runner（未实现）                          checks/c5-replay-idempotency.ts（本版本）
+  同签名 + 新 key   ─┐
+  同 key 重试       ─┼─→ ReplayScenario[] ─→ checkReplayIdempotency() ─→ 13 条 CheckResult
+  同 nonce 重签     ─┘    （每场景 first/second   （纯函数、不发请求、不读环境）
+                            两次尝试观测）
+```
+
+三个场景各有自己的 `first-settled` 前置断言：首次没结算成功时，该场景的「未二次结算」是空洞的。这个前置不是可有可无——复审时曾发现 `nonceReuse` 缺这条会导致全套 12 绿却什么都没验证，现已补齐。与 C4 一样，`cli.ts` 没有 C5 子命令，库入口可直接调用。
+
 ## 设计决策
 
 1. **fail-closed**：读不到、解不出、字段缺失，一律判失败或跳过，绝不默认通过。宁可让人去排查，也不给出虚假的成功结论。
@@ -134,14 +148,14 @@ runner（未实现）                         checks/c4-settlement-order.ts（�
 
 ## 新增一个检查项
 
-以 C5 为例，按现有约定扩展即可：
+以已实现的 C5（`src/checks/c5-replay-idempotency.ts`）为例，按现有约定扩展：
 
-1. 在 `src/checks/` 新建 `c5-replay.ts`，导出 `checkReplay(input): CheckResult[]`。
-2. 断言 id 用 `c5.*` 前缀，级别在 `critical` / `warning` 中选一个，并写清 `detail` 里人能看懂的原因。
-3. 顺带在 `test/c5-replay.test.ts` 写正例 + 至少 3 个反例 + 1 个边界。
-4. 在 `src/index.ts` 导出，在 `cli.ts` 的 `check` 流程里按 `--checks` 过滤后调用。
-5. 更新 `docs/CHECKS.md` 的断言表与 `CHANGELOG.md` 的 Unreleased。
-6. `npm run check` 全绿后再提 PR。
+1. 先把规格写进 `docs/CHECKS.md`——它是判定逻辑唯一来源，代码与它不一致时改代码。
+2. 在 `src/checks/` 新建模块，导出 `checkXxx(input): CheckResult[]`；断言 id 用 `cN.*` 前缀，级别在 `critical` / `warning` 中选，并写清 `detail` 里人能看懂的亏损原因。
+3. 写 `test/cN-*.test.ts`：正例 1 个、反例 ≥3、边界 ≥1；每个反例只偏离正例一个字段。
+4. 在 `src/index.ts` 导出；需要外部数据的部分由 runner 注入，检查器不读环境、不发请求。
+5. 同步 `docs/LIMITATIONS.md`、`docs/TESTING.md`、`CHANGELOG.md` 的测试数与状态。
+6. `npm run check` 全绿、再经独立对抗性复审后提交。C5 的复审曾查出「首次未结算却全套绿灯」的空洞通过——代码忠于当时的规格，是规格本身缺前置断言；写规格时要主动找这类缺口。
 
 ## 本地开发
 

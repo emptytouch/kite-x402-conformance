@@ -108,11 +108,18 @@ node dist/cli.js authorize http://localhost:8080/v1/echo --payment-signature @si
 
 本文件只记任务二。任务一的活跃天数按实际开发日期汇总，不拿 PR 合并日替代；两者不要混在同一张表里。
 
-## 8. C4 判定层（0.2.0 之后的增量）
+## 8. C4 / C5 判定层（0.2.0 之后的增量）
 
-上表与测试输出记录的是 `0.2.0` 定稿时的状态。其后新增 C4 结算时序**判定层**（`src/checks/c4-settlement-order.ts`，12 条断言 + 24 个测试），测试基线由 100 增至 124。此增量尚未发布、尚未单独 commit，不计入上表 `0.2.0` 的 commit 区间。
+上表与测试输出记录的是 `0.2.0` 定稿时的状态。其后新增两个判定层：
 
-需要如实区分：C4 是纯判定函数，输入为调用方注入的四个探针观测；探针执行层与 CLI 子命令均未实现，**没有** live 结算证据。它不改变 `docs/EVIDENCE.md` 的「尚无 live 记录」结论。规格见 `docs/CHECKS.md` 的 C4 章节，边界见 `docs/LIMITATIONS.md`。
+| 增量 | 源码 | 断言 | 测试 | commit 状态 | 测试基线 |
+|---|---|---|---|---|---|
+| C4 结算时序 | `src/checks/c4-settlement-order.ts` | 12 | 24 | 已 commit `fcfce4d` | 100 → 124 |
+| C5 重放与幂等 | `src/checks/c5-replay-idempotency.ts` | 13 | 31 | 本轮新增，待 commit | 124 → 155 |
+
+两者都未发布为新的 npm 版本，也不计入上表 `0.2.0` 的 commit 区间。
+
+需要如实区分：C4 / C5 都是纯判定函数，输入为调用方注入的可信观测；探针执行层与 CLI 子命令均未实现，**没有** live 结算证据。它们不改变 `docs/EVIDENCE.md` 的「尚无 live 记录」结论。规格见 `docs/CHECKS.md`，边界见 `docs/LIMITATIONS.md`。
 
 ## 9. 提交前自查
 
