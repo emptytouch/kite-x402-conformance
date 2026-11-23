@@ -8,15 +8,18 @@
 |---|---|
 | 仓库链接 | `https://github.com/emptytouch/kite-x402-conformance` |
 | 许可证 | Apache-2.0 |
-| 当前版本 | `0.2.0`（`85061d1`，含 C3 定稿前加固；另有未发布 Planned 项见 CHANGELOG） |
+| 当前版本 | `0.2.0`（`85061d1`）；其后的 C4 / C5 / C1 增量为 Unreleased，见 `CHANGELOG.md` |
 | 仓库创建 / 首次公开日期 | `2026-11-16`（GitHub created_at `2026-11-16T14:52:24Z`；首个 commit `a2e067b` 同日） |
-| 本期新增 commit 区间 | `a2e067b` 至 `85061d1`，含两端共两个 commit（`git log --oneline --reverse 85061d1`） |
+| 本期 authored commit | `a2e067b`、`85061d1`、`1a270e5`、`fcfce4d`、`6f37c24`；C1 增量见 Unreleased |
 
-本期区间内只有两个 commit：
+已提交的五个 commit（按时间正序）：
 
 ```text
-85061d1 feat: add C3 authorization conformance checks and harden validation
 a2e067b feat: initial C2 conformance checker with CLI, tests and docs
+85061d1 feat: add C3 authorization conformance checks and harden validation
+1a270e5 docs: finalize submission record and version history
+fcfce4d feat: add C4 settlement order verdict layer
+6f37c24 feat: add C5 replay and idempotency verdict layer
 ```
 
 ## 2. 本期变更
@@ -40,15 +43,20 @@ $ npm run check
  RUN  v2.1.9
  ✓ test/wire.test.ts (8 tests)
  ✓ test/networks.test.ts (9 tests)
+ ✓ test/c5-replay-idempotency.test.ts (31 tests)
+ ✓ test/c4-settlement-order.test.ts (24 tests)
+ ✓ test/c1-manifest.test.ts (29 tests)
  ✓ test/c2-challenge.test.ts (21 tests)
  ✓ test/eip712.test.ts (16 tests)
  ✓ test/c3-authorization.test.ts (46 tests)
 
- Test Files  5 passed (5)
-      Tests  100 passed (100)
+ Test Files  8 passed (8)
+      Tests  184 passed (184)
 
 > tsc -p tsconfig.build.json
 exit=0
+
+上表为含 C1 增量的当前基线。`0.2.0` 定稿时的输出是 5 文件 / 100 用例；两者不要混用。
 ```
 
 ## 4. 运行演示
@@ -84,12 +92,12 @@ node dist/cli.js authorize http://localhost:8080/v1/echo --payment-signature @si
 
 | 阶段 | 状态 | 证据 |
 |---|---|---|
-| ① 登记 PR | **已提交（OPEN，CI 通过）**，截至 `2026-11-20` 尚未合并 | https://github.com/electric-capital/open-dev-data/pull/3153 |
+| ① 登记 PR | **已提交（OPEN / MERGEABLE / `build` success）**，截至 `2026-11-23` 尚未合并 | https://github.com/electric-capital/open-dev-data/pull/3153 |
 | ② 生态映射生效 | 未确认（依赖 ① 合并） | developerreport 侧截图或链接 |
 | ③ Commit 抓取 | 未开始（依赖 ②） | 统计页面表现 |
 | ④ 开发者归因 | 未确认（依赖 ②） | 归属页面 |
 
-> ① 的 PR 创建于 `2026-11-17`，截至 `2026-11-20` 复查仍为 OPEN / CLEAN / `build` success，review 0、comment 0。②–④ 尚未发生，不能提前写成「已生效」。
+> ① 的 PR 创建于 `2026-11-17`，分别在 `2026-11-20` 与 `2026-11-23` 复查：仍为 OPEN / MERGEABLE / `build` success，没有 review 或 comment。②–④ 尚未发生，不能提前写成「已生效」。
 
 ## 6. 技术关联证据（供核验）
 
@@ -102,24 +110,26 @@ node dist/cli.js authorize http://localhost:8080/v1/echo --payment-signature @si
 | Kite chainId 进入 EIP-712 域 | `src/eip712.ts` 的 `eip712DomainSeparator` + `test/eip712.test.ts` 的固定黄金值 |
 | EIP-3009 授权可恢复（离线 `ecrecover`） | `src/checks/c3-authorization.ts` 的 `c3.signature-recovery` + `test/c3-authorization.test.ts` |
 | 签名规范性（v ∈ {27,28}、低 s） | `src/eip712.ts` 的 `parseSignature65` + `c3.signature-format` / `c3.signature-low-s` |
+| 清单声明与实测挑战的链 / 收款方 / 资产 / 金额绑定一致性 | `src/checks/c1-manifest.ts` 的 `c1.network` / `c1.pay-to-match` / `c1.asset-match` / `c1.amount-match` + `test/c1-manifest.test.ts` |
 | 依赖 | `package.json`：`viem` 用于地址校验、EIP-712 编码与签名恢复，`zod` 用于载荷校验 |
 
 ## 7. 月度活跃台账（任务一另记）
 
 本文件只记任务二。任务一的活跃天数按实际开发日期汇总，不拿 PR 合并日替代；两者不要混在同一张表里。
 
-## 8. C4 / C5 判定层（0.2.0 之后的增量）
+## 8. C1 / C4 / C5 判定层（0.2.0 之后的增量）
 
-上表与测试输出记录的是 `0.2.0` 定稿时的状态。其后新增两个判定层：
+上表与 `0.2.0` 定稿时的测试输出（5 文件 / 100 用例）记录的是定稿状态。其后新增三个判定层：
 
 | 增量 | 源码 | 断言 | 测试 | commit 状态 | 测试基线 |
 |---|---|---|---|---|---|
 | C4 结算时序 | `src/checks/c4-settlement-order.ts` | 12 | 24 | 已 commit `fcfce4d` | 100 → 124 |
-| C5 重放与幂等 | `src/checks/c5-replay-idempotency.ts` | 13 | 31 | 本轮新增，待 commit | 124 → 155 |
+| C5 重放与幂等 | `src/checks/c5-replay-idempotency.ts` | 13 | 31 | 已 commit `6f37c24` | 124 → 155 |
+| C1 清单一致性 | `src/checks/c1-manifest.ts` | 12 | 29 | 本次新增（Unreleased） | 155 → 184 |
 
-两者都未发布为新的 npm 版本，也不计入上表 `0.2.0` 的 commit 区间。
+三者都未发布为新的 npm 版本，也不计入 `0.2.0` 的定稿区间。
 
-需要如实区分：C4 / C5 都是纯判定函数，输入为调用方注入的可信观测；探针执行层与 CLI 子命令均未实现，**没有** live 结算证据。它们不改变 `docs/EVIDENCE.md` 的「尚无 live 记录」结论。规格见 `docs/CHECKS.md`，边界见 `docs/LIMITATIONS.md`。
+需要如实区分：C1 / C4 / C5 都是纯判定函数，输入为调用方注入的可信观测或结构化清单；清单解析、探针执行层与 CLI 子命令均未实现，**没有** live 结算证据。它们不改变 `docs/EVIDENCE.md` 的「尚无 live 记录」结论。规格见 `docs/CHECKS.md`，边界见 `docs/LIMITATIONS.md`。
 
 ## 9. 提交前自查
 

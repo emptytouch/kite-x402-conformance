@@ -6,11 +6,88 @@
 
 | 编号 | 检查项 | 断言数 | 状态 | 目标周 |
 |---|---|---|---|---|
-| C1 | 清单一致性（`service.yaml` / `.well-known/x402` vs 实测） | — | 未实现 | W3 |
+| C1 | 清单一致性（`service.yaml` / `.well-known/x402` vs 实测） | **12** | **已实现（判定层）** | W3 ✅ |
 | **C2** | **402 挑战结构** | **10** | **已实现** | W1 ✅ |
 | **C3** | **授权可构造（EIP-712 域 + EIP-3009 可恢复签名）** | **14** | **已实现** | W2 ✅ |
 | **C4** | **结算时序（无签名不转发、上游失败不结算、成功返收据）** | **12** | **已实现** | W2 ✅ |
 | **C5** | **重放与幂等（同签名 / 同键 / 换键绕过）** | **13** | **已实现** | **W3 ✅** |
+
+## C1 · 清单一致性
+
+清单声称的服务参数，和客户端实际拿到的 402 挑战，是两份独立信息。卖家把 `service.yaml` / `.well-known/x402` 写错（收款地址过期、网络写错、金额与端点不符、端点加量却没更新清单）时，客户端按清单集成就会付错钱或被拒付；反过来，实测端点没有出现在清单里，说明清单已经漂移。C1 把这两份信息放在一起比对。
+
+**这是纯判定函数，不解析 YAML、不发请求。** 清单解析与 HTTP 探针由 runner 负责；判定层只接收已结构化的声明条目与实测条目。这样判定逻辑不绑定某一种清单格式，也不会把「解析失败」伪装成「不一致」。
+
+输入契约：
+
+```ts
+type ManifestSource = "static-file" | "well-known" | "challenge-echo" | "unknown";
+
+interface ManifestEntry {
+  readonly path: string;              // "/v1/echo"
+  readonly network: string | number;  // "eip155:2368" | 2368
+  readonly payTo: string;             // 0x… 40 hex
+  readonly asset: string;             // 0x… 40 hex
+  readonly amount: string;            // 原子单位、无前导零的十进制整数字符串
+}
+
+interface ObservedEntry {
+  readonly path: string;
+  readonly responseStatus: number;    // 必须 402
+  readonly hasPaymentRequired: boolean;
+  readonly network: string | number;
+  readonly payTo: string;
+  readonly asset: string;
+  readonly amount: string;
+}
+
+interface ManifestConsistencyInput {
+  readonly source: ManifestSource;    // 清单来自哪里，决定比对是否有意义
+  readonly manifest: readonly ManifestEntry[];
+  readonly observed: readonly ObservedEntry[];
+}
+```
+
+`source` 是本检查的核心：`challenge-echo` 表示清单是用实测挑战反推生成的——这种「清单」和实测必然一致，比对是同义反复，必须明确失败；`unknown` 表示 runner 无法证明清单独立采集，不能算通过；只有 `static-file` / `well-known` 才允许继续判定。判定层无法自证 runner 的诚实性，只能基于它提供的来源元数据做决定。
+
+输出：固定顺序的 12 条断言。
+
+| 断言 id | 断言 | 级别 | 失败对应的亏损场景 |
+|---|---|---|---|
+| `c1.input` | 输入结构合法：数组、必需自有字段、类型与格式（路径、`0x` 地址、原子单位金额、可解析网络） | critical | 畸形输入下给出「一致」结论，比没有检查更危险 |
+| `c1.source-independent` | 清单来源为 `static-file` 或 `well-known` | critical | 清单是挑战回显，比对自证；`unknown` 为 skip，不能算 pass |
+| `c1.manifest-present` | 清单至少声明一个端点 | critical | 空清单 vs 实测端点，若算通过则完全漏报 |
+| `c1.observed-present` | 至少有一个实测端点观测 | critical | 空观测下所有比对空洞通过 |
+| `c1.challenge-shape` | 每个实测端点返回 402 且带 `PAYMENT-REQUIRED` | critical | 对 200 响应做「挑战一致性」判定，结论无意义 |
+| `c1.no-undeclared` | 每个实测付费端点都在清单中声明 | critical | 端点加量未入清单，客户按清单集成会漏付/被拒 |
+| `c1.no-ghost` | 每个清单声明端点都有对应的 402 实测 | critical | 清单列了不存在的服务端点，客户按清单集成直接失败 |
+| `c1.network-match` | 同路径声明网络与实测网络 chainId 一致 | critical | 客户按 2368 付款、服务端按 2366 收，签名域错配 |
+| `c1.pay-to-match` | 同路径声明收款地址与实测一致（大小写归一） | critical | 付款打到旧地址或第三方地址 |
+| `c1.asset-match` | 同路径声明资产地址与实测一致 | critical | 客户付错代币，卖家收不到款 |
+| `c1.amount-match` | 同路径声明金额与实测原子单位金额一致 | critical | 按清单报价付款被拒，或超付 |
+| `c1.no-conflict` | 清单内同一 `(path, network)` 没有值互相矛盾的重复声明 | warning | 同端点同网络两个报价，客户选哪个都可能是错的 |
+
+比对规则：
+
+- 路径按原字符串精确匹配（runner 负责规范化 query / trailing slash）。`no-undeclared` / `no-ghost` 只做路径级覆盖判定；同一路径声明与观测网络不同时，只由 `c1.network-match` 报告，不重复算作「未声明」。
+- 网络统一经 `chainIdFromNetworkField` 转为 chainId 后比较，接受 `eip155:2368` / `2368` / 数字 `2368`；无法解析视为输入非法。
+- 地址按 `0x` + 40 hex 校验，比较时转小写；非规范地址视为输入非法，不做「看起来像」的猜测。
+- 金额是原子单位整数字符串，必须无前导零；`00100` 与 `100` 不视为同一声明，输入校验直接拒绝。JSON number 一律拒绝——`JSON.parse` 可能已经把大于 2^53 的金额悄悄改写。
+- 跨路径比对：断言级别汇总，任一路径不一致即该断言失败，`evidence` 列出具体路径；不是每条路径各出一条断言。
+
+skip 规则（级联，skip 永远不等于通过）：
+
+1. `c1.input` 失败 → 其余 11 条全部 skip。
+2. `c1.source-independent` 为 `challenge-echo`（fail）或 `unknown`（skip）→ 其余 10 条全部 skip。
+3. `c1.manifest-present` 或 `c1.observed-present` 失败 → 其后的断言全部 skip。
+4. 四个值级断言（`network` / `pay-to` / `asset` / `amount`）只在双方都有该路径时判定；路径缺失已由 `no-undeclared` / `no-ghost` 报告，不在值级断言里重复判失败。
+
+### C1 明确不检查的东西
+
+- 不解析 `service.yaml` / `.well-known/x402` 的原始文本，也不验证清单来源是否真的来自声明的 origin——runner 负责，判定层只能看 `source` 元数据。
+- 不验证清单是否被篡改、是否有有效签名。
+- 不发送付款、不读取链上状态、不核验收款地址是否属于卖家。
+- 不替代 C2（挑战结构）、C3（授权可构造）、C4（结算时序）、C5（重放幂等）；清单一致但挑战本身写错仍会被 C2 抓到。
 
 ## C2 · 402 挑战结构
 

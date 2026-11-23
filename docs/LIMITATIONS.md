@@ -11,7 +11,7 @@
 | CLI：`check` / `authorize` / `networks` / `decode` | ✅ 已实现 | 见 `docs/CLI.md` |
 | 配置校验（环境变量 + 地址格式） | ✅ 已实现 | 非法值启动即失败 |
 | JSON 输出（stdout） | ✅ 已实现 | 尚未写文件、未出 JUnit |
-| C1 清单一致性 | ❌ 未实现 | 计划 W3 |
+| C1 清单一致性 | ⚠️ 判定层已实现 | 不解析 YAML、不发请求；清单来源由 runner 声明，判定层无法自证其真实性 |
 | C4 结算时序（判定层） | ✅ 已实现 | `checkSettlementOrder` 纯函数，12 条断言；输入是 runner 注入的四探针观测。**没有 CLI 子命令、不发请求、不产生观测** |
 | C5 重放与幂等（判定层） | ✅ 已实现 | `checkReplayIdempotency` 纯函数，13 条断言；输入是 runner 注入的三场景两尝试观测。**没有 CLI 子命令、不发请求、不产生观测** |
 | `doctor` 环境自检 | ❌ 未实现 | 计划 W4 |

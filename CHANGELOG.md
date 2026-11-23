@@ -30,10 +30,18 @@ C4 只做判定：四探针的执行与 `upstreamCalled` / `settled` 观测采�
 
 C5 与 C4 同为判定层：三场景的探针执行、`settled` / `cacheHit` / `upstreamCalled` 观测采集、链上 `authorizationState` 核验都属未来 runner 层，本版本**没有** CLI 子命令、不发请求、不产生 live 证据。见 `docs/LIMITATIONS.md`。
 
+- **C1 判定层**（`src/checks/c1-manifest.ts`）：`checkManifestConsistency({ source, manifest, observed })`，12 条 `c1.*` 断言，比较清单声明与实测 402 挑战的路径覆盖、网络、收款方、资产与原子单位金额。`source` 为 `challenge-echo`（清单由挑战反推）明确失败，`unknown` 只能 skip——清单与实测同源时比对是同义反复，不能算通过
+- **C1 输入安全**：所有字段只读一次并快照为普通对象；原型继承字段拒绝；访问器换值不能制造空洞通过；抛出的值（包括自身字符串化也抛的值）转为 `c1.input=fail` + 其余 skip，不向调用方抛异常
+- 测试从 155 个增至 184 个（`test/c1-manifest.test.ts` 新增 29 个）
+- 规格见 `docs/CHECKS.md`；三轮独立对抗复审后无真实剩余缺陷
+
+### 边界说明
+
+C1 不解析 `service.yaml` / `.well-known/x402` 原始文本，不验证清单来源真实性或签名，不发请求。清单解析与观测采集由未来的 runner 提供，本版本无 CLI 子命令、无 live 证据。
+
 ### Planned
 
-- C4 / C5 探针执行层（mock upstream + mock facilitator）与 CLI 子命令，把观测接入真实服务
-- C1：与 `service.yaml` / `.well-known/x402` 的清单一致性比对（W3）
+- C1 清单解析与探针执行层、C4 / C5 探针执行层（mock upstream + mock facilitator）与 CLI 子命令，把观测接入真实服务
 - `--pay` 实盘模式与 `docs/EVIDENCE.md` 首条 live 记录（W4）
 - `doctor` 环境自检（W4）
 - `--reporter=junit` 与退出码在 CI 模板中的示例（视需求）
