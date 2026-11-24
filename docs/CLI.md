@@ -8,6 +8,7 @@
 |---|---|---|
 | `x402conf check <url>` | 对单条端点执行 C2 检查 | 已实现 |
 | `x402conf authorize [url]` | 对一份 `PAYMENT-SIGNATURE` 载荷执行 C3 检查 | 已实现 |
+| `x402conf verify` | 对内置 sandbox 卖家执行 C4 四探针结算时序检查 | 已实现（仅 sandbox） |
 | `x402conf networks` | 列出内置 Kite 网络、端点与确证状态 | 已实现 |
 | `x402conf decode <value>` | 解码 `PAYMENT-*` 头，用于排障 | 已实现 |
 | `x402conf doctor` | 环境自检（RPC 可达、chainId、资产地址） | 未实现（W4） |
@@ -144,6 +145,74 @@ FAIL  c3.signature-recovery  signature recovers to the authorising payer
 
 在 `check` 的字段基础上多一个 `evaluatedAt`（实际用于窗口判定的 unix 秒），其余结构相同。
 
+## `verify`
+
+```bash
+x402conf verify [options]
+```
+
+在**内置 sandbox** 中执行 C4 的四个结算时序探针，输出 12 条断言。sandbox 由三个本地 HTTP 服务组成：独立 mock upstream、独立 mock facilitator，以及作为被测对象的合成 seller。`upstreamCalled` / `settled` 取自 mock 请求日志，**不采信 seller 自报头**。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--defect <mode>` | `none` | 注入一个结算缺陷，取值见下表 |
+| `--timeout <ms>` | `5000` | 单个请求超时 |
+| `--json` | `false` | 输出机器可读 JSON，附原始 mock 日志 |
+
+命令不接受位置参数：`verify free-access` 会被拒绝并返回退出码 3，不会静默退化成默认模式。
+
+`--defect` 取值：
+
+| 值 | 注入的缺陷 | 预期失败断言 |
+|---|---|---|
+| `none` | 无 | 无 |
+| `free-access` | 无签名也转发并结算 | `c4.unsigned.*` 三条 |
+| `forged-signature` | 错误签名也放行 | `c4.invalid-signature.*` 三条 |
+| `charge-on-error` | 上游 503 仍结算 | `c4.upstream-error.no-settle` |
+| `skip-settlement` | 上游 2xx 不结算 | `c4.upstream-success.settled` / `receipt` |
+| `bad-receipt` | 结算了但收据 hash 非法 | `c4.upstream-success.receipt` |
+| `forged-claim` | 没结算却自报合法收据 | `c4.upstream-success.settled` |
+
+```bash
+$ x402conf verify
+...
+PASS  c4.upstream-success.settled  upstream 2xx is settled
+PASS  c4.upstream-success.receipt  200 with PAYMENT-RESPONSE txHash 0xabab…
+12 passed, 0 failed, 0 skipped
+
+$ x402conf verify --defect charge-on-error
+...
+FAIL  c4.upstream-error.no-settle  upstream returned 503 but settlement happened
+11 passed, 1 failed, 0 skipped
+# exit=1
+```
+
+`--json` 在 `check` 的结构上多出 `sandbox` 对象：
+
+```json
+{
+  "command": "verify",
+  "target": "sandbox:charge-on-error",
+  "network": "eip155:2368",
+  "sandbox": {
+    "defect": "charge-on-error",
+    "endpoints": { "seller": "http://127.0.0.1:…", "upstream": "http://127.0.0.1:…", "facilitator": "http://127.0.0.1:…" },
+    "observations": [{ "probe": "upstreamError", "responseStatus": 503, "upstreamCalled": true, "upstreamStatus": 503, "settled": true, "settlementStatus": 200 }],
+    "captures": { "upstreamError": { "upstream": [ … ], "facilitator": [ … ] } }
+  },
+  "summary": { "pass": 11, "fail": 1, "skip": 0, "criticalFail": 1, "warningFail": 0 }
+}
+```
+
+`captures` 是两个 mock 的原始请求日志，可独立复核观测来源。`target` 前缀 `sandbox:` 且报告中的提示行会写明「mock upstream + mock facilitator, no real chain, no funds」——**这不是真实结算证据**。
+
+`verify` 不读取任何环境变量（包括 `KITE_*`）；每次运行都绑定临时端口并在结束时关闭全部服务。CI 用法：
+
+```bash
+x402conf verify --json > x402-c4-report.json
+x402conf verify --defect forged-claim --json > x402-c4-negative-control.json   # 期望 exit=1
+```
+
 ## `networks`
 
 ```bash
@@ -183,7 +252,7 @@ re-encoded: eyJ4NDAyVmVyc2lvbiI6MiwiYWNjZXB0cyI6W119
 | `0` | 没有失败（可能包含 skip） | 通过 |
 | `1` | 存在 critical 失败 | 阻断 |
 | `2` | 只有 warning 失败 | 告警，不阻断 |
-| `3` | 运行时错误（配置非法、传输失败、无法解码） | 重试一次后阻断 |
+| `3` | 运行时错误（配置非法、传输失败、无法解码、`verify` 参数非法） | 重试一次后阻断 |
 
 ## CI 集成
 

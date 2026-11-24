@@ -265,7 +265,33 @@ interface ProbeObservation {
 
 若 runner 的上游确实「调了但没拿到状态码」，它应把 `upstreamCalled` 记为 `false`（从 C4 的视角，没有可判定状态码的上游调用不产生可判定观测）。五个探针语义字段自洽是 `c4.probes` 的契约；放宽它等于把判定建立在自相矛盾的输入上。
 
-这四个观测必须由**能观察到上游与结算接口的那一层**产生（自建 mock upstream + mock facilitator，或接入了真实遥测的 runner）。只拿一个 URL 跑 `fetch` 无法填满这个输入——因此 C4 目前是**判定层纯函数**，CLI 没有对应的实盘子命令；把它接到真实服务属于未来 runner 层的工作，见 `docs/LIMITATIONS.md`。把观测当真值而非让服务端自报，是这条检查不被骗过的前提。
+这四个观测必须由**能观察到上游与结算接口的那一层**产生。只拿一个 URL 跑 `fetch` 无法填满这个输入——判定层因此保持为纯函数，观测由独立的 runner 层采集。
+
+### 探针执行层（已实现，仅内置 sandbox）
+
+`src/probes/settlement-order.ts` 提供 `runSandboxSettlementProbes()`，CLI 对应 `x402conf verify`。它启动三个各自独立的本地 HTTP 服务：mock upstream、mock facilitator，以及作为**被测对象**的 sandbox seller，然后依次发四个探针。
+
+观测生成规则是这条检查的可信基础：
+
+1. 每个探针开始前清空两个 mock 的调用日志；探针顺序执行，并等待 seller 返回后才读日志。因此一条日志只可能属于当前探针，不需要 seller 回传关联 id。
+2. `upstreamCalled` / `upstreamStatus` 只从 mock upstream 的请求日志取；`settled` / `settlementStatus` 只从 mock facilitator 的 `/settle` 日志取。
+3. seller 响应头（包括 `PAYMENT-RESPONSE`）只作为 `responseHeaders` 传给收据校验，**从不参与** `upstreamCalled` / `settled` 的判定。
+
+第 3 条有一个专门的反证模式 `forged-claim`：seller 在完全没有调用 facilitator 的情况下，返回一个带合法 tx hash 的 `PAYMENT-RESPONSE`。此时 `c4.upstream-success.receipt` 会通过，但 `c4.upstream-success.settled` 必须失败。测试 `test/settlement-order-runner.test.ts` 对照 `none` 与 `forged-claim` 两次运行，锁住这条信任边界。
+
+sandbox seller 内置 7 种模式（`none` 与 6 种缺陷），每种缺陷只改一处时序决策：
+
+| `--defect` | 注入的缺陷 | 必须失败的断言 |
+|---|---|---|
+| `none` | 无 | 无（12 条全过） |
+| `free-access` | 无签名也转发并结算 | `unsigned.status` / `no-forward` / `no-settle` |
+| `forged-signature` | 错误签名也放行 | `invalid-signature.status` / `no-forward` / `no-settle` |
+| `charge-on-error` | 上游 503 仍结算 | `upstream-error.no-settle` |
+| `skip-settlement` | 上游 2xx 不结算、无收据 | `upstream-success.settled` / `receipt` |
+| `bad-receipt` | 结算了但收据 hash 非法 | `upstream-success.receipt` |
+| `forged-claim` | 没结算却自报合法收据 | `upstream-success.settled` |
+
+这套 runner **只测内置合成 seller**：它不连真实 facilitator、不发交易、不读链。通过只说明「在 sandbox 观测下时序正确」，不是任何真实服务的合规证据。接真实服务需要对方指向同一组 mock 并提供等价遥测，或另写 live runner——两者都未实现，见 `docs/LIMITATIONS.md`。
 
 ### 断言表（12 条）
 
@@ -310,7 +336,7 @@ skip 恒不等于通过：报告底部的提示与 C2/C3 一致。
 | 签名本身是否有效 | 离线验签是 C3 的职责 | C3 |
 | 链上 tx 是否真的成功落块 | 需要 RPC 读收据 | 未来 runner 的 live 模式 |
 | `nonce` 是否被二次结算 | 需要跨请求状态 | C5 |
-| 服务端是否谎报 `upstreamCalled` / `settled` | 观测源的可信度是 runner 的责任，判定层无法自证 | runner / mock 环境 |
+| 服务端是否谎报 `upstreamCalled` / `settled` | 判定层无法自证；sandbox runner 通过独立的 mock 日志规避，真实服务仍需自己的可信遥测 | `src/probes/settlement-order.ts`（sandbox），真实遥测未实现 |
 
 ## C5 · 重放与幂等
 

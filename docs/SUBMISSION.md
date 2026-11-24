@@ -8,11 +8,11 @@
 |---|---|
 | 仓库链接 | `https://github.com/emptytouch/kite-x402-conformance` |
 | 许可证 | Apache-2.0 |
-| 当前版本 | `0.2.0`（`85061d1`）；其后的 C4 / C5 / C1 增量为 Unreleased，见 `CHANGELOG.md` |
+| 当前版本 | `0.2.0`（`85061d1`）；其后的 C4 / C5 / C1 判定层与 C4 sandbox runner 为 Unreleased，见 `CHANGELOG.md` |
 | 仓库创建 / 首次公开日期 | `2026-11-16`（GitHub created_at `2026-11-16T14:52:24Z`；首个 commit `a2e067b` 同日） |
-| 本期 authored commit | `a2e067b`、`85061d1`、`1a270e5`、`fcfce4d`、`6f37c24`；C1 增量见 Unreleased |
+| 本期 authored commit | `a2e067b`、`85061d1`、`1a270e5`、`fcfce4d`、`6f37c24`、`12be087`；C4 sandbox runner 见 Unreleased |
 
-已提交的五个 commit（按时间正序）：
+已提交的六个 commit（按时间正序）：
 
 ```text
 a2e067b feat: initial C2 conformance checker with CLI, tests and docs
@@ -20,6 +20,7 @@ a2e067b feat: initial C2 conformance checker with CLI, tests and docs
 1a270e5 docs: finalize submission record and version history
 fcfce4d feat: add C4 settlement order verdict layer
 6f37c24 feat: add C5 replay and idempotency verdict layer
+12be087 feat(c1): add manifest consistency verdict layer
 ```
 
 ## 2. 本期变更
@@ -29,6 +30,7 @@ fcfce4d feat: add C4 settlement order verdict layer
 | C2：402 挑战结构检查 | 把「返回了 402」与「按 x402 v2 写对挑战」分开判定；实现 10 条断言、CLI `check` / `networks` / `decode`、头的多种编码解码、Kite 2366/2368 网络常量、配置校验与 30 个测试。原因是模板服务普遍有 402，但结构错误仍会导致客户端无法付款。 | `a2e067b` |
 | C3：授权可构造检查 | 把「挑战写对了」与「客户签出的付款能自洽结算」分开判定；实现 14 条断言、手写 EIP-712/EIP-3009 编码、`authorize` 命令、离线抓包重放、公开测试私钥签名示例与失败归因。原因是金额/链/域绑错在真机上表现为收不到钱，但只靠 402 结构看不出来。 | `85061d1` |
 | 对抗性审查加固 | 对构造输入实测复现并修复 ERC-6492 fail-open、JSON number 被 `JSON.parse` 改写、多选项报价误判、网络绑定缺失、`Object.prototype` 继承键绕过、`network: ""` 遮住 chainId、缺 `asset` 只 skip 等；测试从 85 增至 100。原因是 C3 的「通过」若建立在这些漏洞上会给出虚假信心。 | `85061d1` |
+| C4 sandbox 探针执行层（Unreleased） | 只靠一次客户端响应无法证明「有没有真的结算」。新增独立 mock upstream / facilitator 与合成卖家，`verify` 从 mock 请求日志生成观测；六种可注入缺陷逐一反证检查器能抓到真实时序问题，`forged-claim` 证明自报收据不能替代真实 `/settle`。仍是 sandbox，无 live 证据。 | 本次新增，待 commit |
 
 ## 3. 测试结果
 
@@ -49,14 +51,15 @@ $ npm run check
  ✓ test/c2-challenge.test.ts (21 tests)
  ✓ test/eip712.test.ts (16 tests)
  ✓ test/c3-authorization.test.ts (46 tests)
+ ✓ test/settlement-order-runner.test.ts (18 tests)
 
- Test Files  8 passed (8)
-      Tests  184 passed (184)
+ Test Files  9 passed (9)
+      Tests  202 passed (202)
 
 > tsc -p tsconfig.build.json
 exit=0
 
-上表为含 C1 增量的当前基线。`0.2.0` 定稿时的输出是 5 文件 / 100 用例；两者不要混用。
+上表为含 C1 判定层与 C4 sandbox runner 增量的当前基线。`0.2.0` 定稿时的输出是 5 文件 / 100 用例；两者不要混用。
 ```
 
 ## 4. 运行演示
@@ -86,7 +89,16 @@ node dist/cli.js authorize http://localhost:8080/v1/echo --payment-signature @si
 # 14 passed, 0 failed, 0 skipped，exit=0
 ```
 
-`docs/EVIDENCE.md` 只记录 dry-run；当前**没有 live 记录**，因为工具不发送真实交易。
+```bash
+node dist/cli.js verify
+# 12 passed, 0 failed, 0 skipped，exit=0（内置 sandbox，四个探针真实经过 HTTP）
+
+node dist/cli.js verify --defect forged-claim
+# 11 passed, 1 failed, 0 skipped，exit=1；c4.upstream-success.settled 失败
+# 负对照：卖家自报合法收据，但 mock facilitator 没有 /settle 调用
+```
+
+`docs/EVIDENCE.md` 只记录 dry-run 与 sandbox；当前**没有 live 记录**，因为工具不发送真实交易。
 
 ## 5. Open Dev Data 登记状态
 
@@ -111,6 +123,7 @@ node dist/cli.js authorize http://localhost:8080/v1/echo --payment-signature @si
 | EIP-3009 授权可恢复（离线 `ecrecover`） | `src/checks/c3-authorization.ts` 的 `c3.signature-recovery` + `test/c3-authorization.test.ts` |
 | 签名规范性（v ∈ {27,28}、低 s） | `src/eip712.ts` 的 `parseSignature65` + `c3.signature-format` / `c3.signature-low-s` |
 | 清单声明与实测挑战的链 / 收款方 / 资产 / 金额绑定一致性 | `src/checks/c1-manifest.ts` 的 `c1.network` / `c1.pay-to-match` / `c1.asset-match` / `c1.amount-match` + `test/c1-manifest.test.ts` |
+| 结算时序可执行验证：`/verify` → 上游 → `/settle` → 收据的探针编排 | `src/probes/settlement-order.ts` + `src/sandbox/` + `x402conf verify` + `test/settlement-order-runner.test.ts`（七种模式与 `forged-claim` 信任边界反证） |
 | 依赖 | `package.json`：`viem` 用于地址校验、EIP-712 编码与签名恢复，`zod` 用于载荷校验 |
 
 ## 7. 月度活跃台账（任务一另记）
@@ -125,11 +138,12 @@ node dist/cli.js authorize http://localhost:8080/v1/echo --payment-signature @si
 |---|---|---|---|---|---|
 | C4 结算时序 | `src/checks/c4-settlement-order.ts` | 12 | 24 | 已 commit `fcfce4d` | 100 → 124 |
 | C5 重放与幂等 | `src/checks/c5-replay-idempotency.ts` | 13 | 31 | 已 commit `6f37c24` | 124 → 155 |
-| C1 清单一致性 | `src/checks/c1-manifest.ts` | 12 | 29 | 本次新增（Unreleased） | 155 → 184 |
+| C1 清单一致性 | `src/checks/c1-manifest.ts` | 12 | 29 | 已 commit `12be087` | 155 → 184 |
+| C4 sandbox 探针执行层 + `verify` | `src/probes/settlement-order.ts`、`src/sandbox/` | 12（复用判定层） | 18 | 本次新增（Unreleased） | 184 → 202 |
 
-三者都未发布为新的 npm 版本，也不计入 `0.2.0` 的定稿区间。
+四个增量都未发布为新的 npm 版本，也不计入 `0.2.0` 的定稿区间。
 
-需要如实区分：C1 / C4 / C5 都是纯判定函数，输入为调用方注入的可信观测或结构化清单；清单解析、探针执行层与 CLI 子命令均未实现，**没有** live 结算证据。它们不改变 `docs/EVIDENCE.md` 的「尚无 live 记录」结论。规格见 `docs/CHECKS.md`，边界见 `docs/LIMITATIONS.md`。
+需要如实区分：C1 / C4 / C5 的判定逻辑都是纯函数，输入为调用方注入的可信观测或结构化清单。C4 的 `verify` 已能真实跑完四探针，但观测来自仓库自建的 mock 日志与合成卖家；C1 清单解析、C5 探针执行层、接真实服务的 runner 与 `--pay` 均未实现，**没有** live 结算证据。它们不改变 `docs/EVIDENCE.md` 的「尚无 live 记录」结论。规格见 `docs/CHECKS.md`，边界见 `docs/LIMITATIONS.md`。
 
 ## 9. 提交前自查
 

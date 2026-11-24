@@ -6,6 +6,10 @@
 
 ### Added
 
+- **C4 探针执行层**（`src/probes/settlement-order.ts` + `src/sandbox/`）：`x402conf verify` 启动独立的 mock upstream、mock facilitator 与内置合成 seller，顺序执行四个探针；`upstreamCalled` / `settled` 只从两个 mock 的请求日志生成，seller 自报的 `PAYMENT-RESPONSE` 只进入收据校验。JSON 报告附 `sandbox.captures` 原始日志与 `sandbox.observations`，可独立复核观测来源
+- **六种可注入缺陷**：`--defect free-access | forged-signature | charge-on-error | skip-settlement | bad-receipt | forged-claim`。每种只改一处时序决策，测试断言各自必须失败的 `c4.*` 断言，证明检查器不是空跑。`forged-claim` 是信任边界反证：合法-looking 收据 + 零 `/settle` 调用，`receipt` 通过而 `settled` 失败
+- **CLI `verify` 子命令**：`--defect` / `--timeout` / `--json`，退出码沿用 0/1/2/3 契约；位置参数被明确拒绝（Commander 默认会静默丢弃，实测 `verify free-access` 曾退化成 `none` 并给出全绿，已加回归测试）
+- 测试从 184 个增至 202 个（`test/settlement-order-runner.test.ts` 新增 18 个：七种模式、mock 日志归属、信任边界对照、参数 fail-closed、四个 CLI 契约用例）
 - **C4 判定层**（`src/checks/c4-settlement-order.ts`）：`checkSettlementOrder({ observations })`，12 条 `c4.*` 断言，按四个探针观测判定结算时序——无签名返回 402 且不转发不结算、错误签名返回 402 且不转发不结算、上游 4xx/5xx 不结算、上游 2xx 必须结算并返回 200 与含合法 tx hash 的 `PAYMENT-RESPONSE`。每条断言对应一个真实亏损场景，映射见 `docs/CHECKS.md`
 - **收据校验**：`PAYMENT-RESPONSE` 经 `decodeHeaderValue` 解码，接受顶层或 `receipt` / `settlement` 嵌套下的 `txHash` / `transactionHash` / `tx` / `hash`，要求 `/^0x[0-9a-fA-F]{64}$/`；空对象、占位字符串、格式错误一律 critical 失败，不 skip
 - **fail-closed 输入校验**：探针缺失、重复、字段类型非法（含 `settled: "false"` 字符串、越界状态码）→ `c4.probes` 失败，其余 11 条全部 skip；上游失败探针未触达上游时 `no-settle` skip（不是 pass）；无签名/错误签名探针即使被转发，其 `no-settle` 仍照常判定
@@ -20,7 +24,7 @@
 
 ### 边界说明
 
-C4 只做判定：四探针的执行与 `upstreamCalled` / `settled` 观测采集属未来 runner 层，本版本**没有** CLI 子命令、不发请求、不产生 live 证据。把服务端自报头部当观测会使结论可被伪造；观测源可信度不在判定层能力内。见 `docs/LIMITATIONS.md` 与 `docs/ARCHITECTURE.md`。
+此处描述的是最初的判定层。后续已补上 sandbox runner，`x402conf verify` 可以端到端跑通四探针；但**只测内置合成卖家**，不连真实 facilitator、不发真实交易、不产生 live 证据。把服务端自报头部当观测仍会使结论可被伪造，runner 用独立 mock 日志规避这一点。见 `docs/LIMITATIONS.md` 与 `docs/ARCHITECTURE.md`。
 
 - **C5 判定层**（`src/checks/c5-replay-idempotency.ts`）：`checkReplayIdempotency({ scenarios })`，13 条 `c5.*` 断言，按三场景的两尝试观测判定重复扣款——同签名换键重放、同键重试、同 nonce 重新签名。三个场景各有 `first-settled` 前置：首次没结算时「未二次扣款」是空洞的，不能算通过
 - **C5 fail-closed 输入校验**：`settled` / `upstreamCalled` / `cacheHit` 与配套状态码必须自洽；`cacheHit` 同时 `settled` 或转发上游的观测判为输入矛盾（不是 verdict）；必需字段只读自有属性，防止原型污染供给扣款判定；两个合法可为 `undefined` 的状态字段允许键缺失，使观测经 JSON 往返后仍有效
@@ -41,7 +45,7 @@ C1 不解析 `service.yaml` / `.well-known/x402` 原始文本，不验证清单�
 
 ### Planned
 
-- C1 清单解析与探针执行层、C4 / C5 探针执行层（mock upstream + mock facilitator）与 CLI 子命令，把观测接入真实服务
+- C1 清单解析与 C5 三场景探针执行层及 CLI 子命令；把 C4 runner 从内置 sandbox 扩展到真实服务（需要等价遥测）
 - `--pay` 实盘模式与 `docs/EVIDENCE.md` 首条 live 记录（W4）
 - `doctor` 环境自检（W4）
 - `--reporter=junit` 与退出码在 CI 模板中的示例（视需求）

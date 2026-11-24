@@ -9,6 +9,8 @@ import { checkChallenge } from "./checks/c2-challenge.js";
 import type { CheckResult } from "./checks/types.js";
 import { ConfigError, loadConfig, type Config } from "./config.js";
 import { KITE_NETWORKS, networkByName, type KiteNetworkName } from "./networks.js";
+import { runSandboxSettlementProbes } from "./probes/settlement-order.js";
+import { SANDBOX_DEFECTS, isSandboxDefect, type SandboxDefect } from "./sandbox/seller.js";
 import { decodeHeaderValue, encodeHeaderValue } from "./wire.js";
 
 export const VERSION = "0.2.0";
@@ -53,7 +55,12 @@ function label(result: CheckResult): string {
   return pc.dim("SKIP");
 }
 
-function printHuman(target: string, network: KiteNetworkName, results: readonly CheckResult[]): void {
+function printHuman(
+  target: string,
+  network: KiteNetworkName,
+  results: readonly CheckResult[],
+  notes: readonly string[] = [],
+): void {
   const summary = summarise(results);
   console.log(`${pc.bold("x402conf")} ${pc.dim(`v${VERSION}`)}`);
   console.log(`target  ${target}`);
@@ -66,6 +73,7 @@ function printHuman(target: string, network: KiteNetworkName, results: readonly 
   }
 
   console.log("");
+  for (const note of notes) console.log(pc.dim(note));
   const line = `${summary.pass} passed, ${summary.fail} failed, ${summary.skip} skipped`;
   console.log(summary.criticalFail > 0 ? pc.red(line) : summary.warningFail > 0 ? pc.yellow(line) : pc.green(line));
   if (summary.skip > 0) {
@@ -74,12 +82,13 @@ function printHuman(target: string, network: KiteNetworkName, results: readonly 
 }
 
 function emit(
-  command: "check" | "authorize",
+  command: "check" | "authorize" | "verify",
   target: string,
   network: KiteNetworkName,
   results: readonly CheckResult[],
   json: boolean,
   extra: Record<string, unknown> = {},
+  notes: readonly string[] = [],
 ): number {
   const summary = summarise(results);
   if (json) {
@@ -100,7 +109,7 @@ function emit(
       ),
     );
   } else {
-    printHuman(target, network, results);
+    printHuman(target, network, results, notes);
   }
   return exitCodeFor(summary);
 }
@@ -278,6 +287,61 @@ async function runAuthorize(url: string | undefined, options: AuthorizeOptions, 
   return emit("authorize", target, network, results, options.json === true, { evaluatedAt: now });
 }
 
+interface VerifyOptions {
+  defect?: string;
+  timeout?: string;
+  json?: boolean;
+}
+
+/**
+ * C4 sandbox verification. The sandbox seller is synthetic and the
+ * facilitator is a local mock: a pass is evidence about settlement *order*
+ * in this sandbox, never about a real chain or real funds.
+ */
+async function runVerify(options: VerifyOptions): Promise<number> {
+  const rawDefect = options.defect ?? "none";
+  if (!isSandboxDefect(rawDefect)) {
+    console.error(pc.red(`unknown --defect "${rawDefect}"; expected one of: ${SANDBOX_DEFECTS.join(", ")}`));
+    return EXIT.runtimeError;
+  }
+  const defect: SandboxDefect = rawDefect;
+  const timeoutMs = parseInteger(options.timeout ?? "5000", 1);
+  if (timeoutMs === undefined) {
+    console.error(pc.red(`invalid --timeout "${options.timeout ?? ""}"`));
+    return EXIT.runtimeError;
+  }
+
+  let run: Awaited<ReturnType<typeof runSandboxSettlementProbes>>;
+  try {
+    run = await runSandboxSettlementProbes({ defect, timeoutMs });
+  } catch (error) {
+    console.error(pc.red(`sandbox verification failed: ${error instanceof Error ? error.message : String(error)}`));
+    console.error(pc.dim("this is a runner/transport failure, not a conformance verdict"));
+    return EXIT.runtimeError;
+  }
+
+  const notes = [
+    "sandbox only: mock upstream + mock facilitator, no real chain, no funds",
+    "upstreamCalled / settled come from mock request logs, never from seller headers",
+  ];
+  return emit(
+    "verify",
+    `sandbox:${defect}`,
+    "testnet",
+    run.results,
+    options.json === true,
+    {
+      sandbox: {
+        defect,
+        endpoints: run.endpoints,
+        observations: run.observations,
+        captures: run.captures,
+      },
+    },
+    notes,
+  );
+}
+
 const program = new Command();
 program
   .name("x402conf")
@@ -327,6 +391,27 @@ program
     const config = loadConfigOrExit();
     if (config === undefined) return;
     process.exitCode = await runAuthorize(url, options, config);
+  });
+
+program
+  .command("verify")
+  .description("run C4 settlement-order probes against the built-in sandbox (no real funds)")
+  // Commander accepts excess positional arguments by default. Declaring a
+  // variadic sink and rejecting it ourselves keeps the documented exit code
+  // 3 for usage errors; otherwise `verify free-access` silently becomes
+  // `verify` and prints a misleading 12/12 PASS.
+  .argument("[unexpected...]", "no positional arguments; use --defect <mode>")
+  .option("--defect <mode>", `inject one settlement bug: ${SANDBOX_DEFECTS.join(" | ")}`, "none")
+  .option("--timeout <ms>", "per-request timeout in milliseconds", "5000")
+  .option("--json", "emit machine-readable JSON with raw mock logs", false)
+  .action(async (unexpected: string[], options: VerifyOptions) => {
+    if (unexpected.length > 0) {
+      console.error(pc.red(`verify takes no positional arguments; got: ${unexpected.join(" ")}`));
+      console.error(pc.dim("use --defect <mode> to inject a settlement bug"));
+      process.exitCode = EXIT.runtimeError;
+      return;
+    }
+    process.exitCode = await runVerify(options);
   });
 
 program

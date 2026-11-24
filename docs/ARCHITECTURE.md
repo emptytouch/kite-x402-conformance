@@ -13,16 +13,26 @@ kite-x402-conformance/
 │  ├─ wire.ts                 # PAYMENT-* 头的 base64/JSON 编解码
 │  ├─ eip712.ts               # EIP-712 域/结构散列、EIP-3009 摘要、65 字节签名解析
 │  ├─ index.ts                # 库入口（供程序化调用）
-│  └─ checks/
-│     ├─ types.ts             # CheckResult 模型与 pass/fail/skip 构造器
-│     ├─ parse.ts             # C2/C3 共用的字段别名读取
-│     ├─ c2-challenge.ts      # C2：402 挑战结构（10 条断言）
-│     ├─ c3-authorization.ts  # C3：授权可构造（14 条断言）
-│     └─ c4-settlement-order.ts # C4：结算时序（12 条断言，输入为注入的四探针观测）
+│  ├─ checks/
+│  │  ├─ types.ts             # CheckResult 模型与 pass/fail/skip 构造器
+│  │  ├─ parse.ts             # C2/C3 共用的字段别名读取
+│  │  ├─ c1-manifest.ts       # C1：清单一致性（12 条断言，纯函数）
+│  │  ├─ c2-challenge.ts      # C2：402 挑战结构（10 条断言）
+│  │  ├─ c3-authorization.ts  # C3：授权可构造（14 条断言）
+│  │  ├─ c4-settlement-order.ts # C4：结算时序（12 条断言，输入为注入的四探针观测）
+│  │  └─ c5-replay-idempotency.ts # C5：重放幂等（13 条断言，纯函数）
+│  ├─ probes/
+│  │  └─ settlement-order.ts  # C4 runner：编排四探针，从 mock 日志生成可信观测
+│  └─ sandbox/
+│     ├─ mock-services.ts     # 独立 mock upstream / facilitator，各自持有请求日志
+│     └─ seller.ts            # 被测合成卖家，可注入 6 种结算时序缺陷
 ├─ test/
+│  ├─ c1-manifest.test.ts     # C1 清单比对、来源独立性、输入安全
 │  ├─ c2-challenge.test.ts    # C2 正例、反例、别名、边界
 │  ├─ c3-authorization.test.ts# C3 正例、拒付路径、窗口边界、归因
 │  ├─ c4-settlement-order.test.ts # C4 四探针正例、时序反例、收据与 skip 边界
+│  ├─ c5-replay-idempotency.test.ts # C5 三场景正例与空洞通过反例
+│  ├─ settlement-order-runner.test.ts # C4 runner 七种模式、信任边界、CLI 契约
 │  ├─ eip712.test.ts          # 手写编码与 viem 逐字节比对、黄金值、签名解析
 │  ├─ wire.test.ts            # 编解码与畸形输入
 │  └─ networks.test.ts        # 网络归一化与确证标记
@@ -48,10 +58,15 @@ kite-x402-conformance/
 | `checks/c2-challenge.ts` | C2 的 10 条断言，纯函数，输入为状态码 + headers | 网络 IO、报告输出 |
 | `checks/c3-authorization.ts` | C3 的 14 条断言，输入为两个头值 + 评估时刻；签名恢复是 CPU 计算，不联网 | 网络 IO、报告输出、链上状态 |
 | `checks/c4-settlement-order.ts` | C4 的 12 条时序断言，输入为四个探针的可信观测；收据解码是纯计算 | 网络 IO、报告输出、探针采集（属 runner） |
+| `checks/c5-replay-idempotency.ts` | C5 的 13 条重放断言，输入为三场景两次尝试的观测 | 网络 IO、报告输出、探针采集 |
+| `checks/c1-manifest.ts` | C1 的 12 条清单一致性断言，纯函数 | 解析 YAML、发请求、判断清单来源真伪 |
+| `probes/settlement-order.ts` | C4 runner：启动 sandbox、顺序发四个探针、从 mock 日志生成观测 | 判定断言（交给 checks）、报告输出 |
+| `sandbox/mock-services.ts` | 独立 mock upstream / facilitator；各自持有可 drain 的请求日志 | 判定合规性 |
+| `sandbox/seller.ts` | 被测合成卖家，7 种模式（含 6 种结算时序缺陷） | 采集观测；它只是被测对象 |
 | `checks/parse.ts` | 字段别名读取（`amount`/`maxAmountRequired` 等），一份规则两处复用 | 判断合规性 |
 | `eip712.ts` | 手写 EIP-712 域分隔符与结构散列、EIP-3009 摘要、65 字节签名解析（含 v 与低 s 判定） | 决定断言级别 |
 
-依赖方向单向：`cli → checks → (wire, networks, eip712)`；`config` 只被 `cli` 使用。`checks` 内部不发请求、不读环境变量，因此可以用固定输入做单测——C3 的 `now` 也是这样从 runner 注入的，否则测试会随系统时钟漂移。
+依赖方向：`cli → probes → sandbox → checks → (wire, networks, eip712)`，另有 `cli → checks`。`config` 只被 `cli` 使用；`verify` 不读环境变量。`checks` 内部不发请求、不读环境变量，因此可以用固定输入做单测——C3 的 `now` 也是这样从 runner 注入的，否则测试会随系统时钟漂移。runner 可以以任何方式产生观测，但 C4 的观测源必须是独立 mock 日志；seller 自报的头部只进入 `responseHeaders` 用于收据校验。
 
 `eip712.ts` 不调用 viem 的 `hashTypedData`，而是显式拼每一段字节：签名失败时，唯一能定位问题的产物是 domain separator 与 struct hash，而不是一个不透明摘要。代价是这段编码必须被独立验证，所以 `test/eip712.test.ts` 同时做了两件事——与 viem 的 `domainSeparator` / `hashTypedData` 逐字节比对，以及固定一组 Kite testnet 的黄金值。
 
@@ -107,22 +122,42 @@ kite-x402-conformance/
 
 `c3.signature-recovery` 是唯一会做多次椭圆曲线运算的断言：失败时它会把 `version` 与 `chainId` 的各种组合重新算一遍，用来判断「客户到底对着哪个域签的」。这段计算在 `authorize` 里是可观测的（报告耗时约毫秒级），不构成性能问题。
 
-## C4：判定层，尚无子命令
+## C4：sandbox runner + 纯判定层
 
-C4 与 C2/C3 的一个关键差别：它的输入无法从一次客户端响应推出。`upstreamCalled` 与 `settled` 是服务端内部事件，服务端可以在自己的响应头里声称「已结算」而实际什么都没做。因此 `checkSettlementOrder({ observations })` 只做判定，四个探针的执行与观测采集属于未来的 runner 层：
+C4 与 C2/C3 的一个关键差别：它的输入无法从一次客户端响应推出。`upstreamCalled` 与 `settled` 是服务端内部事件，服务端可以在自己的响应头里声称「已结算」而实际什么都没做。因此判定与采集必须分层：
 
 ```
-runner（未实现）                         checks/c4-settlement-order.ts（本版本）
-  无签名请求 ─┐
-  错签名请求 ─┤
-  上游 4xx   ─┼─→ ProbeObservation[] ──→ checkSettlementOrder() ──→ 12 条 CheckResult
-  上游 2xx   ─┘    （含 upstreamCalled /        （纯函数、不发请求、不读环境）
-                    settled / 响应头 / 状态码）
+x402conf verify
+   │
+   ├─ src/probes/settlement-order.ts  runner
+   │    ├─ start mock upstream      （独立 HTTP 服务，持有请求日志）
+   │    ├─ start mock facilitator   （独立 HTTP 服务，持有请求日志）
+   │    ├─ start sandbox seller     （被测对象，可注入 6 种缺陷）
+   │    └─ 四个探针顺序执行
+   │         ├─ 每轮前 drain 两个 mock 的日志
+   │         ├─ 请求 seller，等响应体读完
+   │         └─ 从 mock 日志生成 upstreamCalled / upstreamStatus / settled / settlementStatus
+   │
+   └─► ProbeObservation[] ──► checkSettlementOrder() ──► 12 条 CheckResult
+                              （纯函数、不发请求、不读环境）
 ```
 
-观测源必须是能看见上游与 facilitator 的那一层（自建 mock，或接了遥测的 runner）。把服务端自报的头部当真值会让 C4 被伪造的服务端骗过；这一点写在 `docs/LIMITATIONS.md`，判定层不假设观测不可信。
+seller 的响应头只作为 `responseHeaders` 进入收据校验，不参与上述四个字段。`forged-claim` 模式专门反证这一点：它返回合法-looking 的 `PAYMENT-RESPONSE`，却从不调用 facilitator；`c4.upstream-success.receipt` 会通过，`c4.upstream-success.settled` 必须失败。
 
-因为还没有探针执行层，`cli.ts` **没有** C4 子命令，也没有对应的 live 证据。当前只能通过库入口 `import { checkSettlementOrder } from "kite-x402-conformance"` 传入夹具观测调用。把 C4 接进 CLI 需要先实现 `probes/` 层，这不改变判定函数的接口。
+`--json` 报告带 `sandbox.captures`（两个 mock 的原始请求日志）与 `sandbox.observations`，可以独立于 seller 自述复核每条观测的来源。退出码沿用统一契约：0 全过 / 1 critical 失败 / 2 warning 失败 / 3 参数或运行错误；位置参数会被明确拒绝，避免 `verify free-access` 静默降级成 `none` 后给出全绿。
+
+这是**内置 sandbox 证据**：没有真实 facilitator、没有链上交易、没有 live 记录。库入口仍可直接调用 `checkSettlementOrder` 传入自己的观测；接真实服务需要等价遥测，尚未实现。
+
+关键流程：一次 `verify`
+
+```
+1. 校验 --defect（只允许 7 种内置模式）与 --timeout；均失败则退出 3
+2. 起三个 127.0.0.1 临时端口服务（upstream / facilitator / seller）
+3. 四个探针顺序请求 seller；seller 自己调用 /verify、上游与 /settle
+4. 每个探针后读 mock 日志生成一条 ProbeObservation
+5. checkSettlementOrder({ observations }) → 12 条结果
+6. finally 关闭全部服务；渲染报告并按退出码契约返回
+```
 
 ## C5：同为判定层，覆盖三次重复提交
 
@@ -165,6 +200,8 @@ npm run dev -- check http://localhost:8080/v1/echo   # 直接跑源码
 npm run test:watch                                   # 测试热跑
 npm run check                                        # typecheck + test + build
 npm run example                                      # 起合成卖家，配合 dev 使用
+npm run verify:sandbox                               # 跑 C4 四探针（12 条断言）
+npm run verify:sandbox -- --defect forged-claim      # 反证：自报收据不等于真实结算
 ```
 
 ## 构建与发布
@@ -177,13 +214,14 @@ npm publish --access public
 
 发布前必须确认：`npm run check` 全绿、`CHANGELOG.md` 已写、`git status` 无未提交改动、`npm pack --dry-run` 列表里只有 `dist/` 与文档。
 
-## 扩展点（已预留，未实现）
+## 扩展点
 
-`checks/` 之外的两层**只在文档里规划，没有落任何空壳代码**——避免出现「目录里有文件，跑起来是 not implemented」的情况：
+`probes/` 已落地第一层（`settlement-order.ts`），但只覆盖内置 sandbox，不是通用周期探测器。`reporters/` 仍未落任何空壳代码，避免出现「目录里有文件，跑起来是 not implemented」：
 
-| 层 | 计划职责 | 触发条件 |
+| 层 | 当前状态 | 后续职责 / 触发条件 |
 |---|---|---|
-| `probes/` | 周期性探测，产生时序数据（可用性、结算成功率） | C1–C5 全部稳定后 |
-| `reporters/` | JUnit XML、SARIF、HTML | 有 CI 消费者提出需求后 |
+| `probes/settlement-order.ts` | ✅ 已实现 | C4 sandbox 四探针；接真实服务需要对方指向同一组 mock 或提供等价遥测 |
+| `probes/` 周期探测 | ❌ 未实现 | 可用性、结算成功率的长期时序数据；C1/C5 探针稳定后再做 |
+| `reporters/` | ❌ 未实现 | JUnit XML、SARIF、HTML；有 CI 消费者提出需求后 |
 
 新增层时保持同样的约束：纯函数优先、不读环境、失败必须显式。

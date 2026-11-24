@@ -31,6 +31,7 @@
     "dev": "tsx src/cli.ts",
     "example": "tsx examples/mock-seller.ts",
     "example:pay": "tsx examples/mock-payer.ts",
+    "verify:sandbox": "tsx src/cli.ts verify",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

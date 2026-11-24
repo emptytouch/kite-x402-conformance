@@ -2,7 +2,7 @@
 
 对 Kite 链上的 x402 收费 API 做**黑盒一致性检查**的命令行工具。输入一个 URL，输出「这个服务是否按 x402 v2 的约定收费」。
 
-当前版本 `0.2.0`，已实现 **C1：清单一致性判定层**（12 条断言）、**C2：402 挑战结构**（10 条断言）、**C3：授权可构造**（14 条断言）、**C4：结算时序判定层**（12 条断言）与 **C5：重放与幂等判定层**（13 条断言），共 184 个自动化测试与 CI。C1 / C4 / C5 是纯判定函数，观测由未来的 runner 层提供，当前无 CLI 子命令、无 live 证据。
+当前版本 `0.2.0`，已实现 **C1：清单一致性判定层**（12 条断言）、**C2：402 挑战结构**（10 条断言）、**C3：授权可构造**（14 条断言）、**C4：结算时序判定层**（12 条断言 + sandbox 探针执行层）与 **C5：重放与幂等判定层**（13 条断言），共 202 个自动化测试与 CI。C4 的 `verify` 命令用独立 mock 日志产生观测、可端到端跑通；但它只测内置合成卖家，**不是真实结算证据**。C1 / C5 仍是纯判定函数，无 CLI 子命令、无 live 证据。
 
 ```
 $ x402conf check http://localhost:8080/v1/echo
@@ -65,7 +65,7 @@ x402 的卖家侧模板（Express / Go / Hono / Axum）都会返回 `402` 与 `P
 
 C3 纳入 Kite 的方式不是「提到 Kite 这个词」，而是把 **Kite 两条链的 chainId 真正写进 EIP-712 域**，再用一次真实的 `ecrecover` 反证：签名里承诺的链、代币、金额与挑战里说的完全一致。`c3.signature-recovery` 失败时，检查器会报告「它其实是对着 2366 签的」或「用的是 `version="2"`」——这类错在真实集成里就是收不到钱。
 
-C1 的清单一致性判定、C4 的结算时序判定与 C5 的重放幂等判定已作为库函数提供（`checkManifestConsistency` / `checkSettlementOrder` / `checkReplayIdempotency`，输入为注入的可信观测），但清单解析与采集观测的探针执行层尚未实现，因此目前没有对应的 CLI 子命令；后续会补齐清单读取、`/verify` → 上游 → `/settle` 的探针编排与三次重复请求编排。路径与验收方式见 [docs/CHECKS.md](docs/CHECKS.md)。
+C1 / C4 / C5 的判定逻辑都作为库函数提供（`checkManifestConsistency` / `checkSettlementOrder` / `checkReplayIdempotency`）。其中 C4 已补上探针执行层：`x402conf verify` 启动独立的 mock upstream 与 mock facilitator，从它们的请求日志生成 `upstreamCalled` / `settled` 观测，而不是采信被测服务自己写的响应头。C1 的清单解析与 C5 的三次重复请求编排仍未实现，因此没有对应 CLI 子命令。路径与验收方式见 [docs/CHECKS.md](docs/CHECKS.md)。
 
 ## 3. 功能清单
 
@@ -74,7 +74,7 @@ C1 的清单一致性判定、C4 的结算时序判定与 C5 的重放幂等判�
 | C1 | 清单一致性（`service.yaml` / `.well-known/x402` 与实测挑战对比） | 判定层已实现（`checkManifestConsistency`，12 断言）；清单解析与探针执行未实现 |
 | **C2** | **402 挑战结构（10 条断言）** | **已实现** |
 | **C3** | **授权可构造（EIP-712 域 + EIP-3009 签名可恢复，14 条断言）** | **已实现** |
-| C4 | 结算时序（无签名不转发、失败不结算、成功返收据） | 判定层已实现（`checkSettlementOrder`，12 断言）；探针执行与 CLI 子命令未实现 |
+| C4 | 结算时序（无签名不转发、失败不结算、成功返收据） | 判定层 + sandbox 探针执行层已实现（`x402conf verify`，12 断言）；仅测内置合成卖家，无 live |
 | C5 | 重放与幂等（同签名 / 同键 / 换键绕过均不二次扣款） | 判定层已实现（`checkReplayIdempotency`，13 断言）；探针执行与 CLI 子命令未实现 |
 
 命令行能力：
@@ -83,6 +83,7 @@ C1 的清单一致性判定、C4 的结算时序判定与 C5 的重放幂等判�
 |---|---|
 | `x402conf check <url>` | 对单条端点执行 C2，输出人类可读报告或 `--json` |
 | `x402conf authorize [url]` | 对一份 `PAYMENT-SIGNATURE` 执行 C3；可在线取挑战，也可 `--challenge <path>` 全离线 |
+| `x402conf verify` | 对内置 sandbox 执行 C4 四探针；`--defect` 可注入 6 种缺陷做反证 |
 | `x402conf networks` | 列出内置 Kite 网络与端点确证状态 |
 | `x402conf decode <value>` | 解码 `PAYMENT-*` 头，便于排障 |
 
@@ -205,14 +206,27 @@ node dist/cli.js authorize http://localhost:8080/v1/echo --payment-signature @si
 node dist/cli.js authorize --challenge challenge.txt --payment-signature @sig.txt --now 1700000000 --json
 ```
 
+**示例 G：C4 结算时序的可复现端到端验证（仅 sandbox）**
+
+```bash
+node dist/cli.js verify --json
+# 12 passed, 0 failed, 0 skipped，exit=0
+
+node dist/cli.js verify --defect forged-claim --json
+# 11 passed, 1 failed, 0 skipped，exit=1
+# FAIL c4.upstream-success.settled：卖家返回了收据，mock facilitator 却没有收到 /settle
+```
+
+`--json` 中带 `sandbox.captures`（两个 mock 的原始请求日志），可以独立复核每条观测来自哪里。这里是本地合成服务，没有真实链上交易；详见 [docs/CLI.md](docs/CLI.md)。
+
 完整命令与参数见 [docs/CLI.md](docs/CLI.md)。
 
 ## 8. 已知限制
 
-1. **CLI 只覆盖 C2 与 C3**：C4 / C5 是库函数形式的判定层（12 / 13 条断言），需要调用方注入可信观测，没有 CLI 子命令、不产生 live 证据。C3 的「通过」也只证明**载荷与挑战自洽**——它不证明链上该代币支持 EIP-3009、不证明付款人有余额、不证明 `nonce` 未被用过，这些都需要 RPC，属 C4/C5 的 live 模式范围。
+1. **C4 的 CLI 只测内置 sandbox**：`verify` 从独立 mock 的请求日志采集观测，能真实发现结算时序缺陷，但被测卖家是仓库自带的合成实现，没有接真实 facilitator、没有链上交易。C5 仍只有库函数（13 条断言），没有 CLI 子命令。C3 的「通过」也只证明**载荷与挑战自洽**——它不证明链上该代币支持 EIP-3009、不证明付款人有余额、不证明 `nonce` 未被用过，这些都需要 RPC，属 live 模式范围。
 2. **mainnet 端点未确证**：`src/networks.ts` 中 mainnet 的 RPC 与区块浏览器为 `null`，需通过配置提供；`verified: false` 会在报告里提示。
 3. **字段名按别名容忍**：不同 SDK 版本对 `maxAmountRequired` / `amount`、`payTo` / `payToAddress` 命名不一致，检查器同时接受；缺失时判失败，不猜。
-4. **不做资金操作**：两个命令都只发 GET；`authorize` 只做离线的 `ecrecover`。签名只出现在示例脚本里，且用的是公开测试私钥。
+4. **不做资金操作**：`check` 只对目标发 GET，`authorize` 只做离线的 `ecrecover`；`verify` 只与本地 mock / 合成卖家通信，不连真实 facilitator、不广播交易。签名只出现在示例脚本里，且用的是公开测试私钥。
 5. **智能合约钱包签名判 skip 不判 pass**：ERC-6492 包裹签名需要账户实现才能验证，本版本不建模，报告里会明确标成「未检查」。
 
 完整清单见 [docs/LIMITATIONS.md](docs/LIMITATIONS.md)。
