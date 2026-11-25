@@ -388,6 +388,32 @@ interface ReplayScenarioObservation {
 
 `cacheHit === true && settled === true` 被判为**输入非法**而不是直接判 c5 断言失败：这种组合说明 runner 的观测自相矛盾，此时任何结论都不可信。
 
+### 探针执行层（已实现，仅内置 sandbox）
+
+`src/probes/replay.ts` 提供 `runReplayProbes()`，CLI 对应 `x402conf verify-replay`。它启动独立 mock upstream、mock facilitator、mock cache，以及作为被测对象的有状态合成 seller。三场景各发两次请求，每次请求前清空三个 mock 的日志，因此每行日志只属于当前这次尝试，不靠关联 id 或 seller 自述。
+
+观测来源严格受限：`settled` 来自 facilitator 的 `/settle` 日志，`upstreamCalled` 来自 upstream 日志，`cacheHit` 来自 cache 的 `GET` 命中日志（且 key 必须是本次尝试的 key）。seller 响应里的 `x-c5-cache-claim: hit` 只作为证据保留在 `observations[].responseHeaders`，从不参与判定——`idem-no-cache` 模式专门验证这一点：响应声称命中，mock 日志里却连一次 `GET` 都没有。
+
+seller 注入 7 种缺陷（`none` 为良性）：
+
+| 模式 | 被测缺陷 | 预期失败断言 |
+|---|---|---|
+| `nonce-rebill` | 同签名换新 key 后二次结算并转发 | no-rebill / rejected / no-forward |
+| `idem-no-cache` | 同 key 重试不查缓存、二次结算，并谎报缓存命中 | cached / no-rebill / no-forward |
+| `idem-cached-rebill` | 命中缓存但仍结算并转发 | cached / no-rebill / no-forward |
+| `nonce-reuse-bypass` | 同 nonce 换一份有效签名后二次结算 | no-rebill / rejected |
+| `bad-receipt` | 结算成功但 tx hash 格式非法 | same-result |
+| `forged-claim` | 零 `/settle` 却返回合法-looking 收据 | 三个 first-settled |
+| `first-not-settled` | 首次既不结算也不给收据 | 三个 first-settled + same-result |
+
+两个控制面的区别：`forged-claim` 自报收据但没结算，`same-result` 因两份收据一致而仍通过；`first-not-settled` 连收据都没有，`same-result` 也失败。
+
+**矛盾观测的处理**：判定层把 `cacheHit && (settled || upstreamCalled)` 视为输入非法，`idem-cached-rebill` 正是这种情形。runner 不静默丢掉它，而是把原始冲突写入 JSON 报告的 `sandbox.contradictions`，再将 `cacheHit` 规范化为 `false` 提交判定。这样 `cached` / `no-rebill` / `no-forward` 三条精确失败；若不做规范化，整组场景会因输入矛盾被判非法、其余 12 条全部 skip，反而看不到真正亏钱的是哪一项。该规范化有变异测试反证（去掉后对应测试变红）。
+
+三场景在 seller 内部各自隔离重放状态（签名与 nonce 集合按场景分开），因此调换 `SCENARIO_PLAN` 顺序不会让某场景的首次尝试被另一场景的签名污染。这条也有回归测试与变异反证。
+
+这套 runner 只测内置合成 seller：不发真实交易、不读链上 `authorizationState`、不接真实 facilitator。通过只说明「在 sandbox 观测下三场景没有二次扣款」，不是任何真实服务的合规证据。
+
 ### 断言表（13 条）
 
 每条都以「重复提交时是否会亏钱」为存在理由。三个场景各有自己的 `first-settled` 前置：首次没结算成功时，该场景的「未二次结算」是空洞的——不能把「根本没扣过款」当成「成功阻止了重复扣款」。
@@ -426,7 +452,7 @@ skip 恒不等于通过。
 | nonce 在链上是否真的未消费 | 需要 `authorizationState(from, nonce)` RPC | 未来 runner 的 live 模式 |
 | 幂等缓存的 TTL / 容量 / 淘汰策略 | 属于性能与配置，不是「会不会扣两次钱」 | 服务端自身测试 |
 | 并发请求下的竞态去重 | 需要同时发多个请求的时序控制 | 未来 runner |
-| 服务端自报 `settled` / `cacheHit` 是否真实 | 观测源可信度是 runner 的责任 | runner / mock 环境 |
+| 服务端自报 `settled` / `cacheHit` 是否真实 | sandbox runner 已用独立 mock 日志规避；`x-c5-cache-claim` 只作证据；真实服务仍需自己的可信遥测 | `src/probes/replay.ts`（sandbox），真实遥测未实现 |
 | 收据 tx hash 对应的链上交易是否成功 | 需要读链 | 未来 runner 的 live 模式 |
 
 ## 待确认项（写在明面上，不猜）

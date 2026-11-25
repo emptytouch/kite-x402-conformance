@@ -9,6 +9,7 @@
 | `x402conf check <url>` | 对单条端点执行 C2 检查 | 已实现 |
 | `x402conf authorize [url]` | 对一份 `PAYMENT-SIGNATURE` 载荷执行 C3 检查 | 已实现 |
 | `x402conf verify` | 对内置 sandbox 卖家执行 C4 四探针结算时序检查 | 已实现（仅 sandbox） |
+| `x402conf verify-replay` | 对内置 sandbox 卖家执行 C5 三场景重放/幂等检查 | 已实现（仅 sandbox） |
 | `x402conf networks` | 列出内置 Kite 网络、端点与确证状态 | 已实现 |
 | `x402conf decode <value>` | 解码 `PAYMENT-*` 头，用于排障 | 已实现 |
 | `x402conf doctor` | 环境自检（RPC 可达、chainId、资产地址） | 未实现（W4） |
@@ -213,6 +214,62 @@ x402conf verify --json > x402-c4-report.json
 x402conf verify --defect forged-claim --json > x402-c4-negative-control.json   # 期望 exit=1
 ```
 
+## `verify-replay`
+
+```bash
+x402conf verify-replay [options]
+```
+
+在**内置 sandbox** 中执行 C5 的三个重放场景，每个场景两次真实 HTTP 请求，输出 13 条断言。sandbox 由独立 mock upstream、mock facilitator、独立 mock cache 与有状态合成 seller 组成。`settled` / `upstreamCalled` / `cacheHit` 分别取自 facilitator / upstream / cache 的请求日志；seller 响应中的 `x-c5-cache-claim` 只是证据，不参与判定。
+
+| 参数 | 说明 |
+|---|---|
+| `--defect <mode>` | 注入一种重放缺陷：`none`（默认）、`nonce-rebill`、`idem-no-cache`、`idem-cached-rebill`、`nonce-reuse-bypass`、`bad-receipt`、`forged-claim`、`first-not-settled` |
+| `--timeout <ms>` | 每次请求的超时，默认 5000，必须是正整数且在 Node 定时器范围内 |
+| `--json` | 输出机器可读报告，含 `sandbox.captures` / `observations` / `contradictions` |
+
+命令不接受位置参数：`verify-replay idem-no-cache` 返回退出码 3，不会静默降级成 `none`。
+
+```bash
+$ x402conf verify-replay
+...
+13 passed, 0 failed, 0 skipped   # exit=0
+
+$ x402conf verify-replay --defect idem-cached-rebill
+FAIL  c5.idempotency.cached
+FAIL  c5.idempotency.no-rebill
+FAIL  c5.idempotency.no-forward
+10 passed, 3 failed, 0 skipped   # exit=1
+```
+
+`--json` 的 `command` 为 `verify-replay`，`sandbox` 对象结构：
+
+```json
+{
+  "command": "verify-replay",
+  "sandbox": {
+    "defect": "idem-cached-rebill",
+    "endpoints": { "seller": "…", "upstream": "…", "facilitator": "…", "cache": "…" },
+    "observations": ["…"],
+    "captures": { "nonceReplay": { "first": { "upstream": [], "facilitator": [], "cache": [] }, "second": {} } },
+    "contradictions": [
+      { "scenario": "idempotencyKey", "attempt": "second", "cacheHitRaw": true, "settled": true, "upstreamCalled": true }
+    ]
+  }
+}
+```
+
+`captures` 按场景与尝试分别存放三组 mock 日志，每行只属于一次尝试。`contradictions` 记录「缓存命中却仍结算/转发」的原始冲突；runner 把该次观测规范化为 `cacheHit: false`，让三条亏钱断言照常失败。若没有这个规范化，整组场景会被判定层当作非法输入、其余断言全部 skip。
+
+`verify-replay` 不读取任何环境变量；每次运行绑定临时端口并在结束时关闭全部服务（即使其中一个关闭失败也会尝试其余服务）。CI 用法：
+
+```bash
+x402conf verify-replay --json > x402-c5-report.json
+x402conf verify-replay --defect forged-claim --json > x402-c5-negative-control.json   # 期望 exit=1
+```
+
+这是 sandbox 证据：没有真实 facilitator、没有链上交易、不读取 `authorizationState`，不构成 live 结算证据。
+
 ## `networks`
 
 ```bash
@@ -252,7 +309,7 @@ re-encoded: eyJ4NDAyVmVyc2lvbiI6MiwiYWNjZXB0cyI6W119
 | `0` | 没有失败（可能包含 skip） | 通过 |
 | `1` | 存在 critical 失败 | 阻断 |
 | `2` | 只有 warning 失败 | 告警，不阻断 |
-| `3` | 运行时错误（配置非法、传输失败、无法解码、`verify` 参数非法） | 重试一次后阻断 |
+| `3` | 运行时错误（配置非法、传输失败、无法解码、`verify` / `verify-replay` 参数非法） | 重试一次后阻断 |
 
 ## CI 集成
 

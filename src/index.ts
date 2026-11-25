@@ -11,4 +11,6 @@ export * from "./checks/c4-settlement-order.js";
 export * from "./checks/c5-replay-idempotency.js";
 export * from "./sandbox/mock-services.js";
 export * from "./sandbox/seller.js";
+export * from "./sandbox/replay-seller.js";
 export * from "./probes/settlement-order.js";
+export * from "./probes/replay.js";

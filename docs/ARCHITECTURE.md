@@ -22,10 +22,12 @@ kite-x402-conformance/
 │  │  ├─ c4-settlement-order.ts # C4：结算时序（12 条断言，输入为注入的四探针观测）
 │  │  └─ c5-replay-idempotency.ts # C5：重放幂等（13 条断言，纯函数）
 │  ├─ probes/
-│  │  └─ settlement-order.ts  # C4 runner：编排四探针，从 mock 日志生成可信观测
+│  │  ├─ settlement-order.ts  # C4 runner：编排四探针，从 mock 日志生成可信观测
+│  │  └─ replay.ts            # C5 runner：三场景×两次尝试，从三组 mock 日志生成观测
 │  └─ sandbox/
-│     ├─ mock-services.ts     # 独立 mock upstream / facilitator，各自持有请求日志
-│     └─ seller.ts            # 被测合成卖家，可注入 6 种结算时序缺陷
+│     ├─ mock-services.ts     # 独立 mock upstream / facilitator / cache，各自持有请求日志
+│     ├─ seller.ts            # C4 被测合成卖家，可注入 6 种结算时序缺陷
+│     └─ replay-seller.ts     # C5 有状态被测卖家，可注入 7 种重放/幂等缺陷
 ├─ test/
 │  ├─ c1-manifest.test.ts     # C1 清单比对、来源独立性、输入安全
 │  ├─ c2-challenge.test.ts    # C2 正例、反例、别名、边界
@@ -33,6 +35,7 @@ kite-x402-conformance/
 │  ├─ c4-settlement-order.test.ts # C4 四探针正例、时序反例、收据与 skip 边界
 │  ├─ c5-replay-idempotency.test.ts # C5 三场景正例与空洞通过反例
 │  ├─ settlement-order-runner.test.ts # C4 runner 七种模式、信任边界、CLI 契约
+│  ├─ replay-runner.test.ts   # C5 runner 八种模式、场景隔离、缓存自报反证、CLI 契约
 │  ├─ eip712.test.ts          # 手写编码与 viem 逐字节比对、黄金值、签名解析
 │  ├─ wire.test.ts            # 编解码与畸形输入
 │  └─ networks.test.ts        # 网络归一化与确证标记
@@ -61,12 +64,14 @@ kite-x402-conformance/
 | `checks/c5-replay-idempotency.ts` | C5 的 13 条重放断言，输入为三场景两次尝试的观测 | 网络 IO、报告输出、探针采集 |
 | `checks/c1-manifest.ts` | C1 的 12 条清单一致性断言，纯函数 | 解析 YAML、发请求、判断清单来源真伪 |
 | `probes/settlement-order.ts` | C4 runner：启动 sandbox、顺序发四个探针、从 mock 日志生成观测 | 判定断言（交给 checks）、报告输出 |
-| `sandbox/mock-services.ts` | 独立 mock upstream / facilitator；各自持有可 drain 的请求日志 | 判定合规性 |
-| `sandbox/seller.ts` | 被测合成卖家，7 种模式（含 6 种结算时序缺陷） | 采集观测；它只是被测对象 |
+| `probes/replay.ts` | C5 runner：三场景各两次尝试，从三组 mock 日志生成观测；规范化矛盾并保留原始证据 | 判定断言、报告输出 |
+| `sandbox/mock-services.ts` | 独立 mock upstream / facilitator / cache；各自持有可 drain 的请求日志 | 判定合规性 |
+| `sandbox/seller.ts` | C4 被测合成卖家，7 种模式（含 6 种结算时序缺陷） | 采集观测；它只是被测对象 |
+| `sandbox/replay-seller.ts` | C5 有状态被测卖家，按场景隔离签名/nonce 状态，8 种模式（含 7 种缺陷） | 采集观测；它只是被测对象 |
 | `checks/parse.ts` | 字段别名读取（`amount`/`maxAmountRequired` 等），一份规则两处复用 | 判断合规性 |
 | `eip712.ts` | 手写 EIP-712 域分隔符与结构散列、EIP-3009 摘要、65 字节签名解析（含 v 与低 s 判定） | 决定断言级别 |
 
-依赖方向：`cli → probes → sandbox → checks → (wire, networks, eip712)`，另有 `cli → checks`。`config` 只被 `cli` 使用；`verify` 不读环境变量。`checks` 内部不发请求、不读环境变量，因此可以用固定输入做单测——C3 的 `now` 也是这样从 runner 注入的，否则测试会随系统时钟漂移。runner 可以以任何方式产生观测，但 C4 的观测源必须是独立 mock 日志；seller 自报的头部只进入 `responseHeaders` 用于收据校验。
+依赖方向：`cli → probes → sandbox → checks → (wire, networks, eip712)`，另有 `cli → checks`。`config` 只被 `cli` 使用；`verify` 不读环境变量。`checks` 内部不发请求、不读环境变量，因此可以用固定输入做单测——C3 的 `now` 也是这样从 runner 注入的，否则测试会随系统时钟漂移。runner 可以以任何方式产生观测，但 C4 / C5 的 `settled` / `upstreamCalled` / `cacheHit` 必须来自独立 mock 日志；seller 自报的头部只进入 `responseHeaders` 作证据，不参与判定。`verify` 与 `verify-replay` 都不读环境变量。
 
 `eip712.ts` 不调用 viem 的 `hashTypedData`，而是显式拼每一段字节：签名失败时，唯一能定位问题的产物是 domain separator 与 struct hash，而不是一个不透明摘要。代价是这段编码必须被独立验证，所以 `test/eip712.test.ts` 同时做了两件事——与 viem 的 `domainSeparator` / `hashTypedData` 逐字节比对，以及固定一组 Kite testnet 的黄金值。
 
@@ -159,19 +164,23 @@ seller 的响应头只作为 `responseHeaders` 进入收据校验，不参与上
 6. finally 关闭全部服务；渲染报告并按退出码契约返回
 ```
 
-## C5：同为判定层，覆盖三次重复提交
+## C5：sandbox runner + 纯判定层
 
 C5 和 C4 面对同一个限制：`settled` / `upstreamCalled` / `cacheHit` 都是服务端内部事件，客户端响应无法证明。所以 `checkReplayIdempotency({ scenarios })` 也是纯函数，输入由 runner 注入：
 
 ```
-runner（未实现）                          checks/c5-replay-idempotency.ts（本版本）
-  同签名 + 新 key   ─┐
-  同 key 重试       ─┼─→ ReplayScenario[] ─→ checkReplayIdempotency() ─→ 13 条 CheckResult
-  同 nonce 重签     ─┘    （每场景 first/second   （纯函数、不发请求、不读环境）
-                            两次尝试观测）
+x402conf verify-replay
+   ├─ src/probes/replay.ts          runner：三场景 × 两次尝试
+   ├─ src/sandbox/replay-seller.ts  被测对象（有状态，按场景隔离重放记录）
+   └─ 独立 mock upstream / facilitator / cache
+          ↓
+   ReplayScenarioObservation[]  ─→  checkReplayIdempotency()  ─→ 13 条 CheckResult
+   （观测只取自 mock 日志）           （纯函数、不发请求、不读环境）
 ```
 
-三个场景各有自己的 `first-settled` 前置断言：首次没结算成功时，该场景的「未二次结算」是空洞的。这个前置不是可有可无——复审时曾发现 `nonceReuse` 缺这条会导致全套 12 绿却什么都没验证，现已补齐。与 C4 一样，`cli.ts` 没有 C5 子命令，库入口可直接调用。
+`seller` 自报的 `x-c5-cache-claim` 只进入 `responseHeaders` 作证据。`idem-cached-rebill` 产生的「缓存命中却仍结算/转发」会被规范化为 `cacheHit: false` 并保留原始冲突到 `sandbox.contradictions`，让 `cached` / `no-rebill` / `no-forward` 三条亏钱断言照常失败；否则整组场景会因输入矛盾被判非法、其余 12 条全部 skip。
+
+三个场景各有自己的 `first-settled` 前置断言：首次没结算成功时，该场景的「未二次结算」是空洞的。这个前置不是可有可无——复审时曾发现 `nonceReuse` 缺这条会导致全套 12 绿却什么都没验证，现已补齐。库入口仍可直接调用 `checkReplayIdempotency` 传入自己的观测；接真实服务需要等价遥测与链上 `authorizationState`，尚未实现。
 
 ## 设计决策
 
@@ -202,6 +211,8 @@ npm run check                                        # typecheck + test + build
 npm run example                                      # 起合成卖家，配合 dev 使用
 npm run verify:sandbox                               # 跑 C4 四探针（12 条断言）
 npm run verify:sandbox -- --defect forged-claim      # 反证：自报收据不等于真实结算
+npm run verify:replay                                # 跑 C5 三场景（13 条断言）
+npm run verify:replay -- --defect idem-cached-rebill  # 反证：自报缓存命中却仍二次扣款
 ```
 
 ## 构建与发布
@@ -216,12 +227,13 @@ npm publish --access public
 
 ## 扩展点
 
-`probes/` 已落地第一层（`settlement-order.ts`），但只覆盖内置 sandbox，不是通用周期探测器。`reporters/` 仍未落任何空壳代码，避免出现「目录里有文件，跑起来是 not implemented」：
+`probes/` 已落地两个 runner（`settlement-order.ts`、`replay.ts`），但都只覆盖内置 sandbox，不是通用周期探测器。`reporters/` 仍未落任何空壳代码，避免出现「目录里有文件，跑起来是 not implemented」：
 
 | 层 | 当前状态 | 后续职责 / 触发条件 |
 |---|---|---|
 | `probes/settlement-order.ts` | ✅ 已实现 | C4 sandbox 四探针；接真实服务需要对方指向同一组 mock 或提供等价遥测 |
-| `probes/` 周期探测 | ❌ 未实现 | 可用性、结算成功率的长期时序数据；C1/C5 探针稳定后再做 |
+| `probes/replay.ts` | ✅ 已实现 | C5 sandbox 三场景×两次尝试；接真实服务需要等价遥测与链上 `authorizationState` |
+| `probes/` 周期探测 | ❌ 未实现 | 可用性、结算成功率的长期时序数据；C1 探针稳定后再做 |
 | `reporters/` | ❌ 未实现 | JUnit XML、SARIF、HTML；有 CI 消费者提出需求后 |
 
 新增层时保持同样的约束：纯函数优先、不读环境、失败必须显式。

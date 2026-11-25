@@ -10,7 +10,7 @@ npm run build      # 产出 dist/
 npm run check      # 上面三步串起来，提交前必跑
 ```
 
-当前基线：**9 个测试文件 / 202 个用例全绿**（`typecheck` 无输出即通过）。其中 C1 判定层 29 个、C4 判定层 24 个、C5 判定层 31 个、C4 sandbox runner 与 CLI 契约 18 个。
+当前基线：**10 个测试文件 / 222 个用例全绿**（`typecheck` 无输出即通过）。其中 C1 判定层 29 个、C4 判定层 24 个、C5 判定层 31 个、C4 sandbox runner 与 CLI 契约 18 个、C5 sandbox runner 与 CLI 契约 20 个。
 
 ## 覆盖场景
 
@@ -23,8 +23,11 @@ npm run check      # 上面三步串起来，提交前必跑
 | `test/eip712.test.ts`（16） | 域分隔符与摘要对齐 viem；固定黄金值；只改 version/chainId/name 时摘要变化；结构散列逐字段敏感；签名恢复；v=0/1 与高 s 判定；长度/非 hex/越界 v 拒绝 |
 | `test/c4-settlement-order.test.ts`（24） | 四探针全合规 12 条全过；无签名被转发/被结算；错误签名被转发/被结算/返回非 402；上游 4xx/5xx 结算（核心亏损场景）；上游 2xx/3xx 冒充失败探针时 no-settle 必须 skip 而非空绿；上游 2xx 未结算；收据缺失或返回非 200；tx hash 顶层与嵌套别名、大小写、坏 hash/占位/不可解码 fail-closed；空串别名与坏包装不遮蔽合法 hash、原型键不生效；矛盾布尔量/状态码整体拒绝；非字符串头值不崩溃；探针缺失/重复/字段非法；上游未触达的 skip 级联；skip 不被误报为 pass |
 | `test/settlement-order-runner.test.ts`（18） | 真实 HTTP 起三个本地服务跑四探针；良性模式 12/12 且观测值来自 mock 日志；六种缺陷模式各自的失败断言精确匹配；`forged-claim` 与 `none` 收据相同但结算判定相反（信任边界反证）；captures 不跨探针重复；非法 defect / timeout；`isSandboxDefect` 拒绝继承键；CLI 位置参数假绿回归、`--defect` 退出码与 JSON |
+| `test/replay-runner.test.ts`（20） | 真实 HTTP 起四个本地服务跑三场景×两次尝试；良性 13/13 且观测只来自 mock 日志；七种缺陷各自失败项精确匹配；场景顺序隔离（首次不被其他场景签名污染）；`idem-no-cache` 自报命中但 cache 日志无 `GET` 的反证；`idem-cached-rebill` 矛盾规范化 + `sandbox.contradictions` 原始证据；`forged-claim` 与 `first-not-settled` 收据行为对照；captures 按场景与尝试归属；非法 defect / timeout（含溢出上界）；`isC5Defect` 拒绝继承键；CLI 位置参数假绿回归、`--defect` 退出码与 JSON |
 
-**未覆盖**：真实网络请求、真实 facilitator、真实链上结算。C3 的签名是测试内用固定私钥真实生成的（不是桩），但**没有**向任何链接广播；`examples/mock-payer.ts` 也一样，只做本地 EIP-712 计算。C4 runner 确实通过 HTTP 调用了 mock upstream 与 mock facilitator，但被测卖家是仓库内置的合成实现（见 `src/sandbox/seller.ts`），没有测任何真实服务。真实结算、链上收据核验与接真实服务的观测采集均未实现，见 `docs/CHECKS.md` 与 `docs/LIMITATIONS.md`。
+**未覆盖**：真实网络请求、真实 facilitator、真实链上结算。C3 的签名是测试内用固定私钥真实生成的（不是桩），但**没有**向任何链接广播；`examples/mock-payer.ts` 也一样，只做本地 EIP-712 计算。C4 / C5 runner 确实通过 HTTP 调用了 mock upstream / facilitator / cache，但被测卖家是仓库内置的合成实现（见 `src/sandbox/seller.ts` 与 `src/sandbox/replay-seller.ts`），没有测任何真实服务。真实结算、链上收据核验与接真实服务的观测采集均未实现，见 `docs/CHECKS.md` 与 `docs/LIMITATIONS.md`。
+
+**非假绿验证**：在临时副本上做变异测试（改动后跑同一套测试，不碰工作树）——移除 C5 矛盾规范化、移除 seller 重放守卫、恢复 facilitator 单一合法签名、关闭 CLI 位置参数拒绝、去掉矛盾注入、把场景状态改回全局共享，每种变异都有对应测试变红，恢复后全绿。其中「场景状态改回全局共享」来自独立复审发现的真实缺陷：原实现的三场景共用一份签名集合，正确性依赖 `SCENARIO_PLAN` 的顺序，调换顺序会让后续场景的首次尝试被误判为重放并返回 402；现按场景隔离并有顺序独立性回归测试。
 
 ## 干净环境复现
 

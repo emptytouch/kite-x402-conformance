@@ -6,10 +6,14 @@
 
 ### Added
 
+- **C5 探针执行层**（`src/probes/replay.ts` + `src/sandbox/replay-seller.ts` + `src/sandbox/mock-services.ts`）：`x402conf verify-replay` 启动独立 mock upstream / facilitator / **cache** 与有状态的合成 seller，按 `nonceReplay` / `idempotencyKey` / `nonceReuse` 三场景各发两次真实 HTTP 请求。`settled` / `upstreamCalled` / `cacheHit` 只从三个 mock 的请求日志生成；seller 自报的 `x-c5-cache-claim` 只作证据，不参与判定
+- **矛盾观测的显式规范化**：判定层拒绝 `cacheHit && (settled || upstreamCalled)` 作为输入。runner 遇到「缓存命中但仍结算/转发」时保留原始冲突到 `sandbox.contradictions`，把观测规范化为 `cacheHit: false`，让 `cached` / `no-rebill` / `no-forward` 照常失败，而不是整组场景被判非法后全部 skip
+- **七种可注入重放缺陷**：`nonce-rebill`、`idem-no-cache`、`idem-cached-rebill`、`nonce-reuse-bypass`、`bad-receipt`、`forged-claim`、`first-not-settled`（另有良性 `none`）。三场景在 seller 内各自隔离重放状态，调换顺序不影响判定；`idem-no-cache` 自报命中却从不查缓存，`idem-cached-rebill` 命中仍结算，`forged-claim` 给出合法-looking 收据却零 `/settle`，`first-not-settled` 既不结算也不给收据
+- **CLI `verify-replay` 子命令**：`--defect` / `--timeout` / `--json`，退出码沿用 0/1/2/3 契约；位置参数明确拒绝，避免与 C4 相同的 Commander 静默降级
 - **C4 探针执行层**（`src/probes/settlement-order.ts` + `src/sandbox/`）：`x402conf verify` 启动独立的 mock upstream、mock facilitator 与内置合成 seller，顺序执行四个探针；`upstreamCalled` / `settled` 只从两个 mock 的请求日志生成，seller 自报的 `PAYMENT-RESPONSE` 只进入收据校验。JSON 报告附 `sandbox.captures` 原始日志与 `sandbox.observations`，可独立复核观测来源
 - **六种可注入缺陷**：`--defect free-access | forged-signature | charge-on-error | skip-settlement | bad-receipt | forged-claim`。每种只改一处时序决策，测试断言各自必须失败的 `c4.*` 断言，证明检查器不是空跑。`forged-claim` 是信任边界反证：合法-looking 收据 + 零 `/settle` 调用，`receipt` 通过而 `settled` 失败
 - **CLI `verify` 子命令**：`--defect` / `--timeout` / `--json`，退出码沿用 0/1/2/3 契约；位置参数被明确拒绝（Commander 默认会静默丢弃，实测 `verify free-access` 曾退化成 `none` 并给出全绿，已加回归测试）
-- 测试从 184 个增至 202 个（`test/settlement-order-runner.test.ts` 新增 18 个：七种模式、mock 日志归属、信任边界对照、参数 fail-closed、四个 CLI 契约用例）
+- 测试从 184 个增至 202 个（`test/settlement-order-runner.test.ts` 新增 18 个：七种模式、mock 日志归属、信任边界对照、参数 fail-closed、四个 CLI 契约用例）；C5 runner 再增至 222 个（`test/replay-runner.test.ts` 新增 20 个：八种模式、场景顺序隔离、缓存自报反证、矛盾规范化、mock 日志归属、参数 fail-closed、四个 CLI 契约用例）
 - **C4 判定层**（`src/checks/c4-settlement-order.ts`）：`checkSettlementOrder({ observations })`，12 条 `c4.*` 断言，按四个探针观测判定结算时序——无签名返回 402 且不转发不结算、错误签名返回 402 且不转发不结算、上游 4xx/5xx 不结算、上游 2xx 必须结算并返回 200 与含合法 tx hash 的 `PAYMENT-RESPONSE`。每条断言对应一个真实亏损场景，映射见 `docs/CHECKS.md`
 - **收据校验**：`PAYMENT-RESPONSE` 经 `decodeHeaderValue` 解码，接受顶层或 `receipt` / `settlement` 嵌套下的 `txHash` / `transactionHash` / `tx` / `hash`，要求 `/^0x[0-9a-fA-F]{64}$/`；空对象、占位字符串、格式错误一律 critical 失败，不 skip
 - **fail-closed 输入校验**：探针缺失、重复、字段类型非法（含 `settled: "false"` 字符串、越界状态码）→ `c4.probes` 失败，其余 11 条全部 skip；上游失败探针未触达上游时 `no-settle` skip（不是 pass）；无签名/错误签名探针即使被转发，其 `no-settle` 仍照常判定
@@ -32,7 +36,7 @@
 
 ### 边界说明
 
-C5 与 C4 同为判定层：三场景的探针执行、`settled` / `cacheHit` / `upstreamCalled` 观测采集、链上 `authorizationState` 核验都属未来 runner 层，本版本**没有** CLI 子命令、不发请求、不产生 live 证据。见 `docs/LIMITATIONS.md`。
+C5 现已补上 sandbox runner 与 `verify-replay` 子命令，三场景的 `settled` / `cacheHit` / `upstreamCalled` 观测来自独立 mock 日志。但被测对象仍是内置合成卖家：重新签名用本地标记模拟，不读链上 `authorizationState`，不连真实服务，不产生 live 证据。链上核验仍属未来 live runner。见 `docs/LIMITATIONS.md`。
 
 - **C1 判定层**（`src/checks/c1-manifest.ts`）：`checkManifestConsistency({ source, manifest, observed })`，12 条 `c1.*` 断言，比较清单声明与实测 402 挑战的路径覆盖、网络、收款方、资产与原子单位金额。`source` 为 `challenge-echo`（清单由挑战反推）明确失败，`unknown` 只能 skip——清单与实测同源时比对是同义反复，不能算通过
 - **C1 输入安全**：所有字段只读一次并快照为普通对象；原型继承字段拒绝；访问器换值不能制造空洞通过；抛出的值（包括自身字符串化也抛的值）转为 `c1.input=fail` + 其余 skip，不向调用方抛异常
@@ -45,7 +49,7 @@ C1 不解析 `service.yaml` / `.well-known/x402` 原始文本，不验证清单�
 
 ### Planned
 
-- C1 清单解析与 C5 三场景探针执行层及 CLI 子命令；把 C4 runner 从内置 sandbox 扩展到真实服务（需要等价遥测）
+- C1 清单解析与 CLI 子命令；把 C4 / C5 runner 从内置 sandbox 扩展到真实服务（需要等价遥测）；链上 `authorizationState` 核验
 - `--pay` 实盘模式与 `docs/EVIDENCE.md` 首条 live 记录（W4）
 - `doctor` 环境自检（W4）
 - `--reporter=junit` 与退出码在 CI 模板中的示例（视需求）

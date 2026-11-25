@@ -9,7 +9,9 @@ import { checkChallenge } from "./checks/c2-challenge.js";
 import type { CheckResult } from "./checks/types.js";
 import { ConfigError, loadConfig, type Config } from "./config.js";
 import { KITE_NETWORKS, networkByName, type KiteNetworkName } from "./networks.js";
+import { runReplayProbes } from "./probes/replay.js";
 import { runSandboxSettlementProbes } from "./probes/settlement-order.js";
+import { C5_DEFECTS, isC5Defect, type C5Defect } from "./sandbox/replay-seller.js";
 import { SANDBOX_DEFECTS, isSandboxDefect, type SandboxDefect } from "./sandbox/seller.js";
 import { decodeHeaderValue, encodeHeaderValue } from "./wire.js";
 
@@ -82,7 +84,7 @@ function printHuman(
 }
 
 function emit(
-  command: "check" | "authorize" | "verify",
+  command: "check" | "authorize" | "verify" | "verify-replay",
   target: string,
   network: KiteNetworkName,
   results: readonly CheckResult[],
@@ -342,6 +344,64 @@ async function runVerify(options: VerifyOptions): Promise<number> {
   );
 }
 
+interface ReplayVerifyOptions {
+  defect?: string;
+  timeout?: string;
+  json?: boolean;
+}
+
+/**
+ * C5 sandbox verification: three replay scenarios against a stateful
+ * synthetic seller. The cache, facilitator and upstream are local mocks, so a
+ * pass is evidence about replay handling in this sandbox, never about real
+ * chain state or funds.
+ */
+async function runReplayVerify(options: ReplayVerifyOptions): Promise<number> {
+  const rawDefect = options.defect ?? "none";
+  if (!isC5Defect(rawDefect)) {
+    console.error(pc.red(`unknown --defect "${rawDefect}"; expected one of: ${C5_DEFECTS.join(", ")}`));
+    return EXIT.runtimeError;
+  }
+  const defect: C5Defect = rawDefect;
+  const timeoutMs = parseInteger(options.timeout ?? "5000", 1);
+  if (timeoutMs === undefined) {
+    console.error(pc.red(`invalid --timeout "${options.timeout ?? ""}"`));
+    return EXIT.runtimeError;
+  }
+
+  let run: Awaited<ReturnType<typeof runReplayProbes>>;
+  try {
+    run = await runReplayProbes({ defect, timeoutMs });
+  } catch (error) {
+    console.error(pc.red(`replay verification failed: ${error instanceof Error ? error.message : String(error)}`));
+    console.error(pc.dim("this is a runner/transport failure, not a conformance verdict"));
+    return EXIT.runtimeError;
+  }
+
+  const notes = [
+    "sandbox only: stateful seller + independent mock cache/facilitator/upstream, no real funds",
+    "settled / upstreamCalled / cacheHit come from mock logs, never from seller headers",
+    "a cache hit that also settled is reported under sandbox.contradictions",
+  ];
+  return emit(
+    "verify-replay",
+    `sandbox:${defect}`,
+    "testnet",
+    run.results,
+    options.json === true,
+    {
+      sandbox: {
+        defect,
+        endpoints: run.endpoints,
+        observations: run.observations,
+        captures: run.captures,
+        contradictions: run.contradictions,
+      },
+    },
+    notes,
+  );
+}
+
 const program = new Command();
 program
   .name("x402conf")
@@ -412,6 +472,25 @@ program
       return;
     }
     process.exitCode = await runVerify(options);
+  });
+
+program
+  .command("verify-replay")
+  .description("run C5 replay/idempotency probes against the built-in sandbox (no real funds)")
+  // Same Commander trap as `verify`: without a variadic sink, an accidental
+  // positional argument is discarded and the honest sandbox runs anyway.
+  .argument("[unexpected...]", "no positional arguments; use --defect <mode>")
+  .option("--defect <mode>", `inject one replay bug: ${C5_DEFECTS.join(" | ")}`, "none")
+  .option("--timeout <ms>", "per-request timeout in milliseconds", "5000")
+  .option("--json", "emit machine-readable JSON with raw mock logs", false)
+  .action(async (unexpected: string[], options: ReplayVerifyOptions) => {
+    if (unexpected.length > 0) {
+      console.error(pc.red(`verify-replay takes no positional arguments; got: ${unexpected.join(" ")}`));
+      console.error(pc.dim("use --defect <mode> to inject a replay bug"));
+      process.exitCode = EXIT.runtimeError;
+      return;
+    }
+    process.exitCode = await runReplayVerify(options);
   });
 
 program
