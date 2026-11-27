@@ -6,6 +6,11 @@
 
 ### Added
 
+- **C1 清单解析 + 真实 HTTP 探针执行层**（`src/manifest.ts` + `src/probes/manifest.ts`）：`x402conf verify-manifest` 从本地 `--manifest` 或不同 origin 的 `--manifest-url`（路径须严格为 `/.well-known/x402`）读清单，对每个声明 path 发真实 `GET`，从实际 402 响应的 `PAYMENT-REQUIRED` 生成 `ObservedEntry`，再交给 C1 判定层比对网络 / 收款方 / 资产 / 金额。支持 JSON 与受限 YAML（BOM、行尾注释、无缩进序列；拒绝锚点、fragment、network-path reference）；金额必须是带引号的原子单位整数字符串，JSON number / YAML 裸数字拒绝。路径必须留在 `--base-url` 的 origin 内；非 402 / 无头响应用固定占位值触发 `c1.challenge-shape` 明确失败并级联 skip；头存在但不可解码 / 缺支付字段 / unsafe number 是 runner 错误（退出码 3）
+- **C1 来源独立性与 fail-closed**：本地文件标 `static-file`；远程清单只有路径为 `/.well-known/x402` 且 origin 不同（localhost / 127.0.0.1 / `[::1]` 视为同机）才标 `well-known`；其余标 `unknown`。`--source` 只能确认 runner 判定，不能把 `unknown` 升级为独立来源。`source=unknown` 或「0 pass 且只有 skip」时退出码 3，不能把全 skip 报告当通过；位置参数显式拒绝
+- **CLI `verify-manifest` 契约**：`--manifest` / `--manifest-url` 二选一必填、`--base-url` 必填、`--timeout`、`--source`、`--json`；JSON 报告附 `manifest.entries`（解析后的声明）与 `manifest.probes`（真实响应 path / status / 解出的挑战字段），可独立复核。实测良性清单 12/12 exit 0，金额从 `1000` 改为 `2000` 的负对照 11/1 exit 1（`c1.amount-match` 报 declared 2000, observed 1000）
+- **C1 runner 两轮独立对抗复审**：修复 13 项构造输入可复现的问题，包括路径逃逸 base origin 造成假 12/12 PASS 与 SSRF、全 skip 仍 exit 0、顶层 network 遮蔽支付选项 network、`String()` 把数组强转成合法字段、占位值制造假 mismatch 与空洞通过、YAML 裸数字金额被接受、金额别名优先级与 C2 相反、loopback origin 绕过、非 `/.well-known/x402` 误标 well-known、BOM 解析失败、unsafe number 被误报为缺字段等；每项均有回归测试
+- **非假绿验证**：临时移除路径逃逸防护或 `c1.challenge-shape` 失败后的级联 skip，同一套测试中 2 个用例变红，恢复后全绿。测试从 222 个增至 250 个（`test/manifest-runner.test.ts` 新增 28 个）
 - **C5 探针执行层**（`src/probes/replay.ts` + `src/sandbox/replay-seller.ts` + `src/sandbox/mock-services.ts`）：`x402conf verify-replay` 启动独立 mock upstream / facilitator / **cache** 与有状态的合成 seller，按 `nonceReplay` / `idempotencyKey` / `nonceReuse` 三场景各发两次真实 HTTP 请求。`settled` / `upstreamCalled` / `cacheHit` 只从三个 mock 的请求日志生成；seller 自报的 `x-c5-cache-claim` 只作证据，不参与判定
 - **矛盾观测的显式规范化**：判定层拒绝 `cacheHit && (settled || upstreamCalled)` 作为输入。runner 遇到「缓存命中但仍结算/转发」时保留原始冲突到 `sandbox.contradictions`，把观测规范化为 `cacheHit: false`，让 `cached` / `no-rebill` / `no-forward` 照常失败，而不是整组场景被判非法后全部 skip
 - **七种可注入重放缺陷**：`nonce-rebill`、`idem-no-cache`、`idem-cached-rebill`、`nonce-reuse-bypass`、`bad-receipt`、`forged-claim`、`first-not-settled`（另有良性 `none`）。三场景在 seller 内各自隔离重放状态，调换顺序不影响判定；`idem-no-cache` 自报命中却从不查缓存，`idem-cached-rebill` 命中仍结算，`forged-claim` 给出合法-looking 收据却零 `/settle`，`first-not-settled` 既不结算也不给收据
@@ -45,11 +50,11 @@ C5 现已补上 sandbox runner 与 `verify-replay` 子命令，三场景的 `set
 
 ### 边界说明
 
-C1 不解析 `service.yaml` / `.well-known/x402` 原始文本，不验证清单来源真实性或签名，不发请求。清单解析与观测采集由未来的 runner 提供，本版本无 CLI 子命令、无 live 证据。
+以上是**判定层**的范围，不涉及原始清单文本与 HTTP：这些能力现由本版本新增的 `src/manifest.ts` / `src/probes/manifest.ts` 与 `verify-manifest` CLI 提供（见本文件 Added 开头）。即使有了 runner，C1 仍不验证清单签名，不发付款、不结算、不读链，不构成 live 证据；来源独立性只来自 runner 提供的标记。
 
 ### Planned
 
-- C1 清单解析与 CLI 子命令；把 C4 / C5 runner 从内置 sandbox 扩展到真实服务（需要等价遥测）；链上 `authorizationState` 核验
+- 把 C4 / C5 runner 从内置 sandbox 扩展到真实服务（需要等价遥测）；C1 接经过签名的真实清单源；链上 `authorizationState` 核验
 - `--pay` 实盘模式与 `docs/EVIDENCE.md` 首条 live 记录（W4）
 - `doctor` 环境自检（W4）
 - `--reporter=junit` 与退出码在 CI 模板中的示例（视需求）

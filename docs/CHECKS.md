@@ -6,7 +6,7 @@
 
 | 编号 | 检查项 | 断言数 | 状态 | 目标周 |
 |---|---|---|---|---|
-| C1 | 清单一致性（`service.yaml` / `.well-known/x402` vs 实测） | **12** | **已实现（判定层）** | W3 ✅ |
+| C1 | 清单一致性（JSON / 受限 YAML 清单 vs 实测） | **12** | **已实现（判定层 + 清单解析 + 真实 HTTP 探针 runner）** | W3 ✅ |
 | **C2** | **402 挑战结构** | **10** | **已实现** | W1 ✅ |
 | **C3** | **授权可构造（EIP-712 域 + EIP-3009 可恢复签名）** | **14** | **已实现** | W2 ✅ |
 | **C4** | **结算时序（无签名不转发、上游失败不结算、成功返收据）** | **12** | **已实现** | W2 ✅ |
@@ -16,7 +16,7 @@
 
 清单声称的服务参数，和客户端实际拿到的 402 挑战，是两份独立信息。卖家把 `service.yaml` / `.well-known/x402` 写错（收款地址过期、网络写错、金额与端点不符、端点加量却没更新清单）时，客户端按清单集成就会付错钱或被拒付；反过来，实测端点没有出现在清单里，说明清单已经漂移。C1 把这两份信息放在一起比对。
 
-**这是纯判定函数，不解析 YAML、不发请求。** 清单解析与 HTTP 探针由 runner 负责；判定层只接收已结构化的声明条目与实测条目。这样判定逻辑不绑定某一种清单格式，也不会把「解析失败」伪装成「不一致」。
+**判定层是纯函数，不解析 YAML、不发请求。** 清单解析与 HTTP 探针已由 runner 实现（见下方「C1 清单解析与探针执行层」）；判定层只接收已结构化的声明条目与实测条目。这样判定逻辑不绑定某一种清单格式，也不会把「解析失败」伪装成「不一致」。
 
 输入契约：
 
@@ -80,11 +80,33 @@ skip 规则（级联，skip 永远不等于通过）：
 1. `c1.input` 失败 → 其余 11 条全部 skip。
 2. `c1.source-independent` 为 `challenge-echo`（fail）或 `unknown`（skip）→ 其余 10 条全部 skip。
 3. `c1.manifest-present` 或 `c1.observed-present` 失败 → 其后的断言全部 skip。
-4. 四个值级断言（`network` / `pay-to` / `asset` / `amount`）只在双方都有该路径时判定；路径缺失已由 `no-undeclared` / `no-ghost` 报告，不在值级断言里重复判失败。
+4. `c1.challenge-shape` 失败（存在非 402 / 无 `PAYMENT-REQUIRED` 的观测）→ 其后的断言全部 skip：非挑战没有可信的 network / payTo / asset / amount，比对只会产生占位值的假 mismatch 或「0 comparable endpoints agree」的空洞通过。
+5. 四个值级断言（`network` / `pay-to` / `asset` / `amount`）只在双方都有该路径时判定；路径缺失已由 `no-undeclared` / `no-ghost` 报告，不在值级断言里重复判失败。
+
+### C1 清单解析与探针执行层（runner）
+
+判定层保持纯函数；下面这部分由 runner 负责，产物直接喂给上面的输入契约。
+
+**清单格式。** 接受 JSON 与一个受限 YAML 子集（不做完整 YAML：无锚点、无多行块、无流式集合、无嵌套对象之外的结构）。两者都只产出 `ManifestEntry[]`，字段规则与判定层一致：路径以 `/` 开头、地址为 `0x` + 40 hex、金额为无前导零的十进制整数**字符串**、网络为 `eip155:<id>` / 数字串 / 数字。JSON number 形式的金额一律拒绝（`JSON.parse` 可能已悄悄改写大于 2^53 的值）；YAML 中的裸数字同样拒绝，必须写成带引号的字符串。解析失败是 runner 错误，不是「清单不一致」——不能用判定结果掩盖解析问题。
+
+**来源独立性。** runner 必须如实标注 `source`：
+
+- `static-file`：清单由 `--manifest <path>` 从本地文件读入，与被测服务无关。
+- `well-known`：清单来自与被测服务不同 origin 的 `/.well-known/x402`（由 `--manifest-url` 显式给出）。若与被测端点同 origin，不得算 `well-known`。
+- `challenge-echo`：清单是从被测服务自己的挑战反推出来的。runner 不生成这种清单；若用户传入的清单与探针结果逐字段完全一致且无法证明独立性，也不能据此升级为独立来源。
+- `unknown`：无法证明来源时只能标这个，判定层会 skip，不能算通过。
+
+**探针的可信观测。** 对清单声明的每个 path 发一次真实 `GET`，从 HTTP 响应状态码与 `PAYMENT-REQUIRED` 头解码生成 `ObservedEntry`。观测值只来自这次真实响应，不采信清单自己写的「实测结果」，也不采信服务端任何自报的「结算/缓存」字段。头解码复用 `decodeHeaderValue`（支持 base64 / base64url / URL 编码 / 裸 JSON）。字段别名与 C2 共用 `pickRaw` / `pickPaymentOption`。**没有** `PAYMENT-REQUIRED` 头、或返回状态不是 402，是有效观测（服务确实没给挑战），交给 `c1.challenge-shape` 判失败，runner 用固定占位值保持判定层输入合法、不猜测真实字段。但头**存在却解不出 JSON**、或解出的文档缺必需支付字段，属于 runner 错误：无法从真实响应构造可信观测，此时退出码 3，不让「解析不出来」伪装成「值不一致」。
+
+**失败语义。** 传输错误（连接失败、超时、DNS）是 runner 错误，整次执行退出码 3，不出 conformance 结论；因为「没连上」不等于「服务不一致」。单个端点返回的不是 402，属于有效观测，交给判定层判 `c1.challenge-shape` 失败。`--base-url` 必须显式给出，路径按原字符串拼接（runner 不做 trailing slash / query 规范化，清单声明的 path 就是待测 path）。
+
+**CLI。** `x402conf verify-manifest --manifest <path> --base-url <url> [--timeout <ms>] [--source <source>] [--json]`；`--manifest-url <url>` 用于 `well-known` 来源。`--source` 只能确认 runner 的来源判定，不能把 `unknown` 升级为独立来源。多余位置参数显式拒绝（Commander 默认吞掉，会造成假绿）。`source=unknown` 或「0 pass 且只有 skip」时退出码 3，不把全 skip 当通过。JSON 输出包含解析后的 manifest、探针生成的 observed、source 与原始结果，便于独立审计。
+
+**边界。** 这是真实 HTTP 黑盒探针：它证明「清单写的」与「服务实际返回的 402 挑战」是否一致，不发付款、不结算、不读链上状态，因此不构成 live 结算证据。它也不验证清单内容是否真实属于该卖家（来源独立性由用户提供的事实决定）。
 
 ### C1 明确不检查的东西
 
-- 不解析 `service.yaml` / `.well-known/x402` 的原始文本，也不验证清单来源是否真的来自声明的 origin——runner 负责，判定层只能看 `source` 元数据。
+- 判定层不解析清单原始文本，也不自行判定来源。runner 已解析 JSON / 受限 YAML 并按 origin 与路径标记 `source`，但来源真实性仍取决于用户提供的事实，不是密码学证明；判定层只能看 `source` 元数据。
 - 不验证清单是否被篡改、是否有有效签名。
 - 不发送付款、不读取链上状态、不核验收款地址是否属于卖家。
 - 不替代 C2（挑战结构）、C3（授权可构造）、C4（结算时序）、C5（重放幂等）；清单一致但挑战本身写错仍会被 C2 抓到。

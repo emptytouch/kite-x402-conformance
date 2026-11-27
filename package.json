@@ -33,6 +33,7 @@
     "example:pay": "tsx examples/mock-payer.ts",
     "verify:sandbox": "tsx src/cli.ts verify",
     "verify:replay": "tsx src/cli.ts verify-replay",
+    "verify:manifest": "tsx src/cli.ts verify-manifest",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

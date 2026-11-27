@@ -5,6 +5,8 @@ import { Command } from "commander";
 import pc from "picocolors";
 
 import { checkAuthorization } from "./checks/c3-authorization.js";
+import { parseManifest } from "./manifest.js";
+import { runManifestProbes } from "./probes/manifest.js";
 import { checkChallenge } from "./checks/c2-challenge.js";
 import type { CheckResult } from "./checks/types.js";
 import { ConfigError, loadConfig, type Config } from "./config.js";
@@ -49,6 +51,17 @@ function exitCodeFor(summary: Summary): number {
   return EXIT.ok;
 }
 
+/**
+ * All-skip results carry no verified assertions. Never let them exit 0 —
+ * that would tell CI "conformant" when nothing was actually checked.
+ */
+function exitCodeForManifest(summary: Summary, source: string): number {
+  if (source === "unknown")
+    return EXIT.runtimeError; // independence could not be established
+  if (summary.pass === 0 && summary.skip > 0) return EXIT.runtimeError;
+  return exitCodeFor(summary);
+}
+
 function label(result: CheckResult): string {
   if (result.status === "pass") return pc.green("PASS");
   if (result.status === "fail") {
@@ -84,13 +97,14 @@ function printHuman(
 }
 
 function emit(
-  command: "check" | "authorize" | "verify" | "verify-replay",
+  command: "check" | "authorize" | "verify" | "verify-replay" | "verify-manifest",
   target: string,
   network: KiteNetworkName,
   results: readonly CheckResult[],
   json: boolean,
   extra: Record<string, unknown> = {},
   notes: readonly string[] = [],
+  exitCodeOverride?: (summary: Summary) => number,
 ): number {
   const summary = summarise(results);
   if (json) {
@@ -113,7 +127,7 @@ function emit(
   } else {
     printHuman(target, network, results, notes);
   }
-  return exitCodeFor(summary);
+  return exitCodeOverride === undefined ? exitCodeFor(summary) : exitCodeOverride(summary);
 }
 
 function resolveNetwork(raw: string | undefined, config: Config): KiteNetworkName | undefined {
@@ -402,6 +416,156 @@ async function runReplayVerify(options: ReplayVerifyOptions): Promise<number> {
   );
 }
 
+interface ManifestVerifyOptions {
+  manifest?: string;
+  manifestUrl?: string;
+  baseUrl?: string;
+  timeout?: string;
+  source?: string;
+  json?: boolean;
+}
+
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    const left = new URL(a);
+    const right = new URL(b);
+    if (left.origin === right.origin) return true;
+    // localhost and 127.0.0.1 are the same machine in local/CI deployments.
+    // Treating them as different origins would let a service echo its own
+    // challenge and still be labelled an independent well-known manifest.
+    const loopback = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+    return (
+      left.protocol === right.protocol &&
+      loopback.has(left.hostname) &&
+      loopback.has(right.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * C1 verification: parse a manifest from an independent source, probe each
+ * declared endpoint over real HTTP and compare the two. No payment, no chain
+ * state, no settlement — this is a black-box consistency check, not live
+ * settlement evidence.
+ */
+async function runVerifyManifest(
+  options: ManifestVerifyOptions,
+): Promise<number> {
+  if ((options.manifest === undefined) === (options.manifestUrl === undefined)) {
+    console.error(pc.red("pass exactly one of --manifest <path> or --manifest-url <url>"));
+    return EXIT.runtimeError;
+  }
+  if (options.baseUrl === undefined || options.baseUrl.length === 0) {
+    console.error(pc.red("--base-url <url> is required"));
+    return EXIT.runtimeError;
+  }
+
+  const timeoutMs = parseInteger(options.timeout ?? "10000", 1);
+  if (timeoutMs === undefined) {
+    console.error(pc.red(`invalid --timeout "${options.timeout ?? ""}"`));
+    return EXIT.runtimeError;
+  }
+
+  let text: string;
+  let source: "static-file" | "well-known" | "unknown";
+  if (options.manifest !== undefined) {
+    try {
+      text = await readFile(options.manifest, "utf8");
+    } catch (error) {
+      console.error(pc.red(`cannot read manifest: ${error instanceof Error ? error.message : String(error)}`));
+      return EXIT.runtimeError;
+    }
+    source = "static-file";
+    const explicit = options.source;
+    if (explicit !== undefined && explicit !== "static-file") {
+      console.error(pc.red(`--source ${explicit} contradicts a local --manifest file`));
+      return EXIT.runtimeError;
+    }
+  } else {
+    const url = options.manifestUrl as string;
+    // A manifest fetched from the same origin as the endpoints under test is
+    // not independent evidence: the service could simply echo its challenge.
+    // The well-known label also requires the canonical path, not just any URL.
+    let isWellKnownPath = false;
+    try {
+      isWellKnownPath = new URL(url).pathname === "/.well-known/x402";
+    } catch {
+      // handled below by fetch failing on an invalid URL
+    }
+    source =
+      sameOrigin(url, options.baseUrl) || !isWellKnownPath ? "unknown" : "well-known";
+    const explicit = options.source;
+    if (explicit !== undefined && explicit !== source) {
+      console.error(pc.red(`--source ${explicit} contradicts manifest origin resolution (${source})`));
+      return EXIT.runtimeError;
+    }
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        headers: { accept: "application/json, text/yaml, text/plain" },
+        redirect: "manual",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!response.ok) {
+        console.error(pc.red(`manifest fetch returned HTTP ${response.status}`));
+        return EXIT.runtimeError;
+      }
+      text = await response.text();
+    } catch (error) {
+      console.error(pc.red(`cannot fetch manifest: ${error instanceof Error ? error.message : String(error)}`));
+      return EXIT.runtimeError;
+    }
+  }
+
+  const parsed = parseManifest(text);
+  if (!parsed.ok) {
+    console.error(pc.red(`manifest parse failed: ${parsed.error}`));
+    console.error(pc.dim("this is a parse error, not a conformance verdict; no checks ran"));
+    return EXIT.runtimeError;
+  }
+
+  let run: Awaited<ReturnType<typeof runManifestProbes>>;
+  try {
+    run = await runManifestProbes({
+      entries: parsed.entries,
+      baseUrl: options.baseUrl,
+      source,
+      timeoutMs,
+    });
+  } catch (error) {
+    console.error(pc.red(`manifest probe failed: ${error instanceof Error ? error.message : String(error)}`));
+    console.error(pc.dim("this is a runner/transport failure, not a conformance verdict"));
+    return EXIT.runtimeError;
+  }
+
+  const notes = [
+    "real HTTP probes: manifest vs the 402 challenges the service actually returns",
+    "no payment, no settlement, no chain state — not live settlement evidence",
+  ];
+  if (source === "unknown") {
+    notes.push("manifest came from the same origin as the target; C1 source check is skipped, not passed");
+  }
+  return emit(
+    "verify-manifest",
+    options.baseUrl,
+    "testnet",
+    run.results,
+    options.json === true,
+    {
+      manifest: {
+        source: run.source,
+        baseUrl: run.baseUrl,
+        entries: parsed.entries,
+        probes: run.probes,
+      },
+    },
+    notes,
+    (summary) => exitCodeForManifest(summary, source),
+  );
+}
+
 const program = new Command();
 program
   .name("x402conf")
@@ -491,6 +655,28 @@ program
       return;
     }
     process.exitCode = await runReplayVerify(options);
+  });
+
+program
+  .command("verify-manifest")
+  .description("run C1 manifest consistency against real HTTP 402 probes (no payment, no chain state)")
+  // Same Commander trap as the other verify commands: excess positional
+  // arguments must be rejected instead of silently ignored.
+  .argument("[unexpected...]", "no positional arguments; use --manifest / --manifest-url")
+  .option("--manifest <path>", "local manifest file (source: static-file)")
+  .option("--manifest-url <url>", "manifest URL, ideally on a different origin (source: well-known)")
+  .option("--base-url <url>", "base URL of the service whose endpoints are probed")
+  .option("--timeout <ms>", "per-request timeout in milliseconds", "10000")
+  .option("--source <source>", "assert the manifest source: static-file | well-known | unknown")
+  .option("--json", "emit machine-readable JSON with manifest, probes and results", false)
+  .action(async (unexpected: string[], options: ManifestVerifyOptions) => {
+    if (unexpected.length > 0) {
+      console.error(pc.red(`verify-manifest takes no positional arguments; got: ${unexpected.join(" ")}`));
+      console.error(pc.dim("use --manifest <path> or --manifest-url <url>"));
+      process.exitCode = EXIT.runtimeError;
+      return;
+    }
+    process.exitCode = await runVerifyManifest(options);
   });
 
 program

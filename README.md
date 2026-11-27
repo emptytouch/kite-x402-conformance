@@ -2,7 +2,7 @@
 
 对 Kite 链上的 x402 收费 API 做**黑盒一致性检查**的命令行工具。输入一个 URL，输出「这个服务是否按 x402 v2 的约定收费」。
 
-当前版本 `0.2.0`，已实现 **C1：清单一致性判定层**（12 条断言）、**C2：402 挑战结构**（10 条断言）、**C3：授权可构造**（14 条断言）、**C4：结算时序**（12 条断言 + sandbox 探针执行层）与 **C5：重放与幂等**（13 条断言 + sandbox 探针执行层），共 222 个自动化测试与 CI。C4 的 `verify` 与 C5 的 `verify-replay` 用独立 mock 日志产生观测、可端到端跑通；但它们只测内置合成卖家，**不是真实结算证据**。C1 仍是纯判定函数，无 CLI 子命令；全项目无 live 证据。
+当前版本 `0.2.0`，已实现 **C1：清单一致性**（12 条断言 + 清单解析 + 真实 HTTP 402 探针）、**C2：402 挑战结构**（10 条断言）、**C3：授权可构造**（14 条断言）、**C4：结算时序**（12 条断言 + sandbox 探针执行层）与 **C5：重放与幂等**（13 条断言 + sandbox 探针执行层），共 250 个自动化测试与 CI。C4 / C5 用独立 mock 日志产生观测、可端到端跑通，但只测内置合成卖家。C1 的 `verify-manifest` 从独立清单出发对真实端点发 HTTP 探针，比对清单声明与实际 402 挑战；它不发付款、不结算、不读链上状态。全项目无 live 证据。
 
 ```
 $ x402conf check http://localhost:8080/v1/echo
@@ -65,13 +65,13 @@ x402 的卖家侧模板（Express / Go / Hono / Axum）都会返回 `402` 与 `P
 
 C3 纳入 Kite 的方式不是「提到 Kite 这个词」，而是把 **Kite 两条链的 chainId 真正写进 EIP-712 域**，再用一次真实的 `ecrecover` 反证：签名里承诺的链、代币、金额与挑战里说的完全一致。`c3.signature-recovery` 失败时，检查器会报告「它其实是对着 2366 签的」或「用的是 `version="2"`」——这类错在真实集成里就是收不到钱。
 
-C1 / C4 / C5 的判定逻辑都作为库函数提供（`checkManifestConsistency` / `checkSettlementOrder` / `checkReplayIdempotency`）。其中 C4 已补上探针执行层：`x402conf verify` 启动独立的 mock upstream 与 mock facilitator，从它们的请求日志生成 `upstreamCalled` / `settled` 观测，而不是采信被测服务自己写的响应头。C1 的清单解析与 C5 的三次重复请求编排仍未实现，因此没有对应 CLI 子命令。路径与验收方式见 [docs/CHECKS.md](docs/CHECKS.md)。
+C1 / C4 / C5 的判定逻辑都作为库函数提供（`checkManifestConsistency` / `checkSettlementOrder` / `checkReplayIdempotency`）。C4 / C5 的 `verify` / `verify-replay` 启动独立 mock 服务，从请求日志生成 `upstreamCalled` / `settled` / `cacheHit` 观测，不采信被测服务自报头。C1 的 `verify-manifest` 解析本地清单或不同 origin 的 `/.well-known/x402`，对清单声明的每个路径发真实 `GET`，从实际 402 响应的 `PAYMENT-REQUIRED` 生成观测；清单来源同 origin 时标 `unknown` 并退出码 3，不判通过。三套 runner 都不发付款、不读链。路径与验收方式见 [docs/CHECKS.md](docs/CHECKS.md)。
 
 ## 3. 功能清单
 
 | 编号 | 检查项 | 状态 |
 |---|---|---|
-| C1 | 清单一致性（`service.yaml` / `.well-known/x402` 与实测挑战对比） | 判定层已实现（`checkManifestConsistency`，12 断言）；清单解析与探针执行未实现 |
+| C1 | 清单一致性（JSON / 受限 YAML 清单与实测挑战对比） | 判定层 + 清单解析 + 真实 HTTP 探针已实现（`x402conf verify-manifest`，12 断言）；黑盒，无 live |
 | **C2** | **402 挑战结构（10 条断言）** | **已实现** |
 | **C3** | **授权可构造（EIP-712 域 + EIP-3009 签名可恢复，14 条断言）** | **已实现** |
 | C4 | 结算时序（无签名不转发、失败不结算、成功返收据） | 判定层 + sandbox 探针执行层已实现（`x402conf verify`，12 断言）；仅测内置合成卖家，无 live |
@@ -85,6 +85,7 @@ C1 / C4 / C5 的判定逻辑都作为库函数提供（`checkManifestConsistency
 | `x402conf authorize [url]` | 对一份 `PAYMENT-SIGNATURE` 执行 C3；可在线取挑战，也可 `--challenge <path>` 全离线 |
 | `x402conf verify` | 对内置 sandbox 执行 C4 四探针；`--defect` 可注入 6 种缺陷做反证 |
 | `x402conf verify-replay` | 对内置 sandbox 执行 C5 三场景各两次尝试；`--defect` 可注入 7 种重放/幂等缺陷做反证 |
+| `x402conf verify-manifest` | 对真实端点执行 C1：解析独立清单并逐路径发 402 探针，比对声明与挑战 |
 | `x402conf networks` | 列出内置 Kite 网络与端点确证状态 |
 | `x402conf decode <value>` | 解码 `PAYMENT-*` 头，便于排障 |
 
@@ -234,15 +235,42 @@ node dist/cli.js verify-replay --defect idem-cached-rebill --json
 
 `--json` 的 `sandbox` 除 `captures` 与 `observations` 外还有 `contradictions`：当缓存命中却仍发生副作用时，runner 保留原始冲突、把观测规范化成合法输入，让三条真正亏钱的断言照常失败，而不是让整组场景因输入矛盾被判非法后全部 skip。`idem-no-cache` 反证则显示 seller 响应里写着 `x-c5-cache-claim: hit`，runner 仍按独立缓存日志判为未命中。
 
+**示例 I：C1 清单 vs 真实 402 挑战（黑盒探针）**
+
+先写一份与合成卖家一致的清单（金额必须是带引号的字符串）：
+
+```json
+{
+  "endpoints": [
+    {
+      "path": "/v1/echo",
+      "network": "eip155:2368",
+      "payTo": "0x1234567890123456789012345678901234567890",
+      "asset": "0x0f5d2fb29fb7d3cfee444a200298f468908cc942",
+      "amount": "1000"
+    }
+  ]
+}
+```
+
+```bash
+npm run example                                  # 终端 1：合成卖家（:8080）
+node dist/cli.js verify-manifest --manifest manifest.json --base-url http://localhost:8080
+# 12 passed, 0 failed, 0 skipped，exit=0
+```
+
+实测输出中 `c1.network-match` / `c1.pay-to-match` / `c1.asset-match` / `c1.amount-match` 各自报告「1 comparable endpoint(s) agree」。把清单里的 `"1000"` 改成 `"2000"` 再跑，`c1.amount-match` 会明确报出实测值 `1000`，exit=1。`--json` 附带 `manifest.entries`（解析后的声明）与 `manifest.probes`（真实响应的 path / status / 解出的挑战字段），可独立复核。若把清单放在被测服务的同 origin 下，runner 标 `source: unknown`、C1 来源断言 skip，退出码 3——不算通过。
+
 完整命令与参数见 [docs/CLI.md](docs/CLI.md)。
 
 ## 8. 已知限制
 
 1. **C4 / C5 的 CLI 只测内置 sandbox**：`verify` 与 `verify-replay` 从独立 mock 的请求日志采集观测，能真实发现结算时序与重放/幂等缺陷，但被测卖家是仓库自带的合成实现，没有接真实 facilitator、没有链上交易。C5 的「重新签名」用本地标记模拟**同 nonce 的另一份有效载荷**，不读链上 `authorizationState`。C3 的「通过」也只证明**载荷与挑战自洽**——它不证明链上该代币支持 EIP-3009、不证明付款人有余额、不证明 `nonce` 未被用过，这些都需要 RPC，属 live 模式范围。
-2. **mainnet 端点未确证**：`src/networks.ts` 中 mainnet 的 RPC 与区块浏览器为 `null`，需通过配置提供；`verified: false` 会在报告里提示。
-3. **字段名按别名容忍**：不同 SDK 版本对 `maxAmountRequired` / `amount`、`payTo` / `payToAddress` 命名不一致，检查器同时接受；缺失时判失败，不猜。
-4. **不做资金操作**：`check` 只对目标发 GET，`authorize` 只做离线的 `ecrecover`；`verify` 与 `verify-replay` 只与本地 mock / 合成卖家通信，不连真实 facilitator、不广播交易。签名只出现在示例脚本里，且用的是公开测试私钥。
-5. **智能合约钱包签名判 skip 不判 pass**：ERC-6492 包裹签名需要账户实现才能验证，本版本不建模，报告里会明确标成「未检查」。
+2. **C1 是真实 HTTP 黑盒探针，但不是 live 证据**：`verify-manifest` 对真实端点发 `GET` 并解码 402 挑战，能发现清单与实际的链 / 收款方 / 资产 / 金额漂移；但它不发付款、不结算、不读链上状态，也不验证清单是否真的由该卖家发布或是否被篡改。来源独立性由 `--manifest`（本地文件）或不同 origin 的 `/.well-known/x402` 提供；同 origin 清单判 `unknown` 并退出码 3。
+3. **mainnet 端点未确证**：`src/networks.ts` 中 mainnet 的 RPC 与区块浏览器为 `null`，需通过配置提供；`verified: false` 会在报告里提示。
+4. **字段名按别名容忍**：不同 SDK 版本对 `maxAmountRequired` / `amount`、`payTo` / `payToAddress` 命名不一致，检查器同时接受；缺失时判失败，不猜。
+5. **不做资金操作**：`check` 与 `verify-manifest` 只对目标发 GET，`authorize` 只做离线的 `ecrecover`；`verify` 与 `verify-replay` 只与本地 mock / 合成卖家通信，不连真实 facilitator、不广播交易。签名只出现在示例脚本里，且用的是公开测试私钥。
+6. **智能合约钱包签名判 skip 不判 pass**：ERC-6492 包裹签名需要账户实现才能验证，本版本不建模，报告里会明确标成「未检查」。
 
 完整清单见 [docs/LIMITATIONS.md](docs/LIMITATIONS.md)。
 

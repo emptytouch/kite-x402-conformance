@@ -435,21 +435,30 @@ export function checkManifestConsistency(input: ManifestConsistencyInput): Check
   const badShapes = observedEntries
     .filter((entry) => entry.responseStatus !== 402 || !entry.hasPaymentRequired)
     .map((entry) => `${entry.path}: status ${entry.responseStatus}, PAYMENT-REQUIRED ${entry.hasPaymentRequired}`);
+  if (badShapes.length > 0) {
+    results.push(
+      fail(
+        ID.shape,
+        titleOf(ID.shape),
+        `not a 402 challenge: ${badShapes.join("; ")}`,
+        "critical",
+        { paths: badShapes },
+      ),
+    );
+    // A non-challenge carries no trustworthy network / payTo / asset / amount.
+    // Comparing those values would report either a fake mismatch against
+    // placeholders or a green "0 comparable endpoints agree". Skip every
+    // dependent assertion: skipped is not passed.
+    skipFrom(results, ID.shape, "probed responses are not 402 challenges");
+    return results;
+  }
   results.push(
-    badShapes.length === 0
-      ? pass(
-          ID.shape,
-          titleOf(ID.shape),
-          "every probed endpoint returned 402 with PAYMENT-REQUIRED",
-          "critical",
-        )
-      : fail(
-          ID.shape,
-          titleOf(ID.shape),
-          `not a 402 challenge: ${badShapes.join("; ")}`,
-          "critical",
-          { paths: badShapes },
-        ),
+    pass(
+      ID.shape,
+      titleOf(ID.shape),
+      "every probed endpoint returned 402 with PAYMENT-REQUIRED",
+      "critical",
+    ),
   );
 
   const declared = index(declaredEntries);

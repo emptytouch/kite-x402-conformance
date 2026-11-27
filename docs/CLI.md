@@ -10,6 +10,7 @@
 | `x402conf authorize [url]` | 对一份 `PAYMENT-SIGNATURE` 载荷执行 C3 检查 | 已实现 |
 | `x402conf verify` | 对内置 sandbox 卖家执行 C4 四探针结算时序检查 | 已实现（仅 sandbox） |
 | `x402conf verify-replay` | 对内置 sandbox 卖家执行 C5 三场景重放/幂等检查 | 已实现（仅 sandbox） |
+| `x402conf verify-manifest` | 解析独立清单并对真实端点发 402 探针，执行 C1 清单一致性检查 | 已实现（真实 HTTP 黑盒，非 live） |
 | `x402conf networks` | 列出内置 Kite 网络、端点与确证状态 | 已实现 |
 | `x402conf decode <value>` | 解码 `PAYMENT-*` 头，用于排障 | 已实现 |
 | `x402conf doctor` | 环境自检（RPC 可达、chainId、资产地址） | 未实现（W4） |
@@ -270,6 +271,96 @@ x402conf verify-replay --defect forged-claim --json > x402-c5-negative-control.j
 
 这是 sandbox 证据：没有真实 facilitator、没有链上交易、不读取 `authorizationState`，不构成 live 结算证据。
 
+## `verify-manifest`
+
+```bash
+x402conf verify-manifest --manifest <path> --base-url <url> [options]
+x402conf verify-manifest --manifest-url <url> --base-url <url> [options]
+```
+
+对**真实端点**执行 C1：从独立来源读清单，对清单声明的每个 path 发一次 `GET`，用实际响应的状态码与 `PAYMENT-REQUIRED` 头生成观测，再与声明逐项比对。输出 12 条 `c1.*` 断言。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--manifest <path>` | — | 本地清单文件，来源标为 `static-file`；与 `--manifest-url` 二选一且必须选一个 |
+| `--manifest-url <url>` | — | 远程清单，仅当路径严格为 `/.well-known/x402` 且与 `--base-url` 不同 origin 时标为 `well-known`，否则 `unknown` |
+| `--base-url <url>` | 必填 | 被测服务的 origin，清单里的 path 按原字符串拼接到它后面 |
+| `--timeout <ms>` | `10000` | 单次请求超时，同时用于拉取远程清单与每个探针 |
+| `--source <source>` | 自动判定 | 显式断言来源：`static-file` / `well-known` / `unknown`；与自动判定不符则退出码 3 |
+| `--json` | `false` | 输出机器可读 JSON，附解析后的清单与逐路径探针记录 |
+
+命令不接受位置参数：`verify-manifest manifest.json` 返回退出码 3，不会静默降级。
+
+**来源独立性。** 清单来自被测服务自己的挑战回显时，比对是同义反复，不能算通过。因此：
+
+- 本地文件标 `static-file`，可直接判定；
+- 远程清单必须同时满足「路径为 `/.well-known/x402`」且「与被测端点不同 origin」，才标 `well-known`；
+- `localhost` 与 `127.0.0.1` / `[::1]` 视为同一台机器，不能拿它俩互相当独立来源；
+- 其余情况标 `unknown`，C1 的来源断言 skip，命令退出码 3（不是 0）；
+- `--source` 只能确认 runner 的判定，不能把 `unknown` 升级成 `well-known`。
+
+**清单格式。** 接受 JSON 与受限 YAML（无锚点、无多行块、无流式集合）：
+
+```yaml
+endpoints:
+  - path: /v1/echo
+    network: eip155:2368
+    payTo: "0x1234567890123456789012345678901234567890"
+    asset: "0x0f5d2fb29fb7d3cfee444a200298f468908cc942"
+    amount: "1000"
+```
+
+字段规则与 `docs/CHECKS.md` 的判定层契约一致：path 以 `/` 开头且不能逃逸 `--base-url` 的 origin；地址为 `0x` + 40 hex；金额为原子单位、无前导零的十进制整数**字符串**。JSON number 与 YAML 裸数字金额一律拒绝——`JSON.parse` 可能已悄悄改写大于 2^53 的值。YAML 中纯数字形式的 `network`（如 `2368`）也必须加引号；`eip155:2368` 可以不加。UTF-8 BOM、行尾注释与无缩进序列可接受。
+
+**探针语义。**
+
+- 每个 path 顺序发一次 `GET`（`redirect: manual`，`Accept: application/json`），只解码这次真实响应；清单里自报的「观测值」与服务端自报的结算 / 缓存字段都不参与判定。
+- 返回非 402、或 402 但没有 `PAYMENT-REQUIRED` 头，是**有效观测**：runner 用固定占位值保持判定层输入合法，由 `c1.challenge-shape` 明确失败，后续值级断言 skip，避免占位值制造假 mismatch 或空洞通过。
+- 头存在但解不出 JSON、解出的文档没有支付选项、缺必需支付字段、或金额 / 链 id 在 `JSON.parse` 阶段已变成 unsafe number，属于 **runner 错误**：退出码 3，不输出 conformance 结论。
+- 连接失败、超时、DNS 错误同样是 runner 错误（退出码 3）。「没连上」不是「清单不一致」。
+
+```bash
+$ x402conf verify-manifest --manifest manifest.json --base-url http://localhost:8080
+...
+PASS  c1.network-match   declared and observed networks agree
+PASS  c1.amount-match    declared and observed amounts agree
+12 passed, 0 failed, 0 skipped        # exit=0
+```
+
+`--json` 在 `check` 的结构上增加 `manifest` 对象：
+
+```json
+{
+  "command": "verify-manifest",
+  "target": "http://localhost:8099",
+  "network": "eip155:2368",
+  "manifest": {
+    "source": "static-file",
+    "baseUrl": "http://localhost:8099",
+    "entries": [{ "path": "/v1/echo", "network": "eip155:2368", "payTo": "0x1234…", "asset": "0x0f5d…", "amount": "1000" }],
+    "probes": [{
+      "path": "/v1/echo",
+      "status": 402,
+      "hasPaymentRequired": true,
+      "entry": { "path": "/v1/echo", "responseStatus": 402, "hasPaymentRequired": true, "network": "eip155:2368", "payTo": "0x1234…", "asset": "0x0f5d…", "amount": "1000" }
+    }]
+  },
+  "summary": { "pass": 12, "fail": 0, "skip": 0, "criticalFail": 0, "warningFail": 0 }
+}
+```
+
+顶层的 `network` 字段是 JSON 报告共有的展示位（此处为 `eip155:2368`），**清单来源只在 `manifest.source`**。C1 的网络判定使用清单与观测里的 `network`，不受这个展示字段影响。
+
+出口码有一处 C1 专属规则：`source === "unknown"` 或「0 pass 且存在 skip」时退出 3，避免一份全是 skip 的报告被 CI 当作通过。其余按 0/1/2/3 通用契约。
+
+```bash
+x402conf verify-manifest --manifest manifest.json --base-url https://api.example.com --json > x402-c1-report.json
+x402conf verify-manifest --manifest-url https://docs.example.org/.well-known/x402 \
+  --base-url https://api.example.com --json > x402-c1-wellknown-report.json   # 期望 exit=0
+```
+
+**边界。** 这是真实 HTTP 黑盒探针：证明的是「清单写的」与「服务实际返回的 402 挑战」是否一致。它不发付款、不结算、不读链上状态，不验证清单是否真的由该卖家发布或签名，因此**不是 live 结算证据**，也不替代 C2 / C3 / C4 / C5。
+
 ## `networks`
 
 ```bash
@@ -309,7 +400,7 @@ re-encoded: eyJ4NDAyVmVyc2lvbiI6MiwiYWNjZXB0cyI6W119
 | `0` | 没有失败（可能包含 skip） | 通过 |
 | `1` | 存在 critical 失败 | 阻断 |
 | `2` | 只有 warning 失败 | 告警，不阻断 |
-| `3` | 运行时错误（配置非法、传输失败、无法解码、`verify` / `verify-replay` 参数非法） | 重试一次后阻断 |
+| `3` | 运行时错误（配置非法、传输失败、无法解码、`verify` / `verify-replay` / `verify-manifest` 参数非法；`verify-manifest` 的清单解析失败、`source=unknown`、或只有 skip 没有 pass） | 重试一次后阻断 |
 
 ## CI 集成
 
