@@ -132,73 +132,97 @@ function hasOwn(record: Record<string, unknown>, key: string): boolean {
   return Object.hasOwn(record, key);
 }
 
-function validAttempt(value: unknown): value is ReplayAttempt {
-  const record = asRecord(value);
-  if (record === undefined) return false;
-  // Own properties only. Receipt fields already reject inherited keys; the
-  // attempt fields must too, or a polluted prototype can supply the flags
-  // that decide whether a double charge is reported.
-  const required = [
-    "responseStatus",
-    "responseHeaders",
-    "responseBodyHash",
-    "settled",
-    "upstreamCalled",
-    "cacheHit",
-  ] as const;
-  for (const key of required) {
-    if (!hasOwn(record, key)) return false;
-  }
-  // settlementStatus / upstreamStatus are legitimately undefined when nothing
-  // settled or no upstream call happened. JSON round-trips drop such keys, so
-  // requiring them to be own properties would reject valid observations. Still
-  // reject an inherited non-undefined value: a polluted prototype must not be
-  // able to supply a status that the runner never reported.
-  for (const key of ["settlementStatus", "upstreamStatus"] as const) {
-    if (!hasOwn(record, key) && record[key] !== undefined) return false;
-  }
-  if (!isStatus(record["responseStatus"])) return false;
-  if (typeof record["responseBodyHash"] !== "string") return false;
-  if (record["responseBodyHash"].length === 0) return false;
-  if (typeof record["settled"] !== "boolean") return false;
-  if (typeof record["upstreamCalled"] !== "boolean") return false;
-  if (typeof record["cacheHit"] !== "boolean") return false;
-  if (!isOptionalStatus(record["settlementStatus"])) return false;
-  if (!isOptionalStatus(record["upstreamStatus"])) return false;
-
-  const settled = record["settled"];
-  const settlementStatus = record["settlementStatus"];
-  if (settled) {
-    if (!is2xx(settlementStatus)) return false;
-  } else if (settlementStatus !== undefined) {
-    return false;
-  }
-
-  const upstreamCalled = record["upstreamCalled"];
-  const upstreamStatus = record["upstreamStatus"];
-  if (upstreamCalled && upstreamStatus === undefined) return false;
-  if (!upstreamCalled && upstreamStatus !== undefined) return false;
-
-  // A cache hit that also settled or reached upstream is not an acceptable
-  // observation: it is the defect under test, so the runner's inputs are
-  // self-contradictory and no verdict can be trusted.
-  if (record["cacheHit"] && (settled || upstreamCalled)) return false;
-
-  const headers = asRecord(record["responseHeaders"]);
-  if (headers === undefined) return false;
-  for (const header of Object.values(headers)) {
-    if (typeof header !== "string") return false;
-  }
-  return true;
+/**
+ * Read a field once, remembering whether it was an own property. Checking
+ * hasOwn and reading the value are two separate reads otherwise; an accessor
+ * could show an own property with a benign value, then return a harmful one.
+ */
+function readOnce(
+  record: Record<string, unknown>,
+  key: string,
+): { own: boolean; value: unknown } {
+  return { own: Object.hasOwn(record, key), value: record[key] };
 }
 
-function validScenario(value: unknown): value is ReplayScenarioObservation {
+/**
+ * Validate and snapshot an attempt in one pass.
+ *
+ * Reading a field twice is an attack surface: an accessor can return a valid
+ * value during validation and a different one when the verdict is decided,
+ * turning a real second charge into a green "no-rebill". Every field is read
+ * exactly once and copied into a plain object; verdicts only see the snapshot.
+ */
+function snapshotAttempt(value: unknown): ReplayAttempt | undefined {
   const record = asRecord(value);
-  if (record === undefined) return false;
-  if (!hasOwn(record, "scenario")) return false;
-  if (!ALL_SCENARIOS.includes(record["scenario"] as ReplayScenarioName)) return false;
-  if (!hasOwn(record, "first") || !hasOwn(record, "second")) return false;
-  return validAttempt(record["first"]) && validAttempt(record["second"]);
+  if (record === undefined) return undefined;
+  // Read every field exactly once, capturing own-ness and value together.
+  // Required fields must be own properties (a polluted prototype must not
+  // supply the flags that decide whether money moved). Optional statuses may
+  // be absent after a JSON round-trip, but an inherited non-undefined value
+  // must never be accepted.
+  const responseStatus = readOnce(record, "responseStatus");
+  const responseHeaders = readOnce(record, "responseHeaders");
+  const responseBodyHash = readOnce(record, "responseBodyHash");
+  const settled = readOnce(record, "settled");
+  const settlementStatus = readOnce(record, "settlementStatus");
+  const upstreamCalled = readOnce(record, "upstreamCalled");
+  const upstreamStatus = readOnce(record, "upstreamStatus");
+  const cacheHit = readOnce(record, "cacheHit");
+  for (const field of [responseStatus, responseHeaders, responseBodyHash, settled, upstreamCalled, cacheHit]) {
+    if (!field.own) return undefined;
+  }
+  if (!settlementStatus.own && settlementStatus.value !== undefined) return undefined;
+  if (!upstreamStatus.own && upstreamStatus.value !== undefined) return undefined;
+
+  if (!isStatus(responseStatus.value)) return undefined;
+  if (typeof responseBodyHash.value !== "string" || responseBodyHash.value.length === 0) return undefined;
+  if (typeof settled.value !== "boolean") return undefined;
+  if (typeof upstreamCalled.value !== "boolean") return undefined;
+  if (typeof cacheHit.value !== "boolean") return undefined;
+  if (!isOptionalStatus(settlementStatus.value)) return undefined;
+  if (!isOptionalStatus(upstreamStatus.value)) return undefined;
+  if (settled.value) {
+    if (!is2xx(settlementStatus.value)) return undefined;
+  } else if (settlementStatus.value !== undefined) {
+    return undefined;
+  }
+  if (upstreamCalled.value && upstreamStatus.value === undefined) return undefined;
+  if (!upstreamCalled.value && upstreamStatus.value !== undefined) return undefined;
+  // A cache hit that also settled or reached upstream is the defect under test:
+  // the observation is self-contradictory, so no verdict can be trusted.
+  if (cacheHit.value && (settled.value || upstreamCalled.value)) return undefined;
+
+  const headers = asRecord(responseHeaders.value);
+  if (headers === undefined) return undefined;
+  const headerSnapshot: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (typeof value !== "string") return undefined;
+    headerSnapshot[name] = value;
+  }
+
+  return {
+    responseStatus: responseStatus.value,
+    responseHeaders: headerSnapshot,
+    responseBodyHash: responseBodyHash.value,
+    settled: settled.value,
+    settlementStatus: settlementStatus.value,
+    upstreamCalled: upstreamCalled.value,
+    upstreamStatus: upstreamStatus.value,
+    cacheHit: cacheHit.value,
+  };
+}
+
+function snapshotScenario(value: unknown): ReplayScenarioObservation | undefined {
+  const record = asRecord(value);
+  if (record === undefined) return undefined;
+  if (!hasOwn(record, "scenario")) return undefined;
+  const scenario = record["scenario"];
+  if (!ALL_SCENARIOS.includes(scenario as ReplayScenarioName)) return undefined;
+  if (!hasOwn(record, "first") || !hasOwn(record, "second")) return undefined;
+  const first = snapshotAttempt(record["first"]);
+  const second = snapshotAttempt(record["second"]);
+  if (first === undefined || second === undefined) return undefined;
+  return { scenario: scenario as ReplayScenarioName, first, second };
 }
 
 const TX_HASH_ALIASES = ["txHash", "transactionHash", "tx", "hash"] as const;
@@ -264,13 +288,13 @@ export function checkReplayIdempotency(input: ReplayIdempotencyInput): CheckResu
     return results;
   }
   for (let index = 0; index < scenarios.length; index++) {
-    const entry = scenarios[index];
-    if (!validScenario(entry)) {
+    const snapshot = snapshotScenario(scenarios[index]);
+    if (snapshot === undefined) {
       invalid.push(`index ${index} is not a well-formed replay scenario`);
       continue;
     }
-    if (byScenario.has(entry.scenario)) duplicates.push(entry.scenario);
-    else byScenario.set(entry.scenario, entry);
+    if (byScenario.has(snapshot.scenario)) duplicates.push(snapshot.scenario);
+    else byScenario.set(snapshot.scenario, snapshot);
   }
   const missing = ALL_SCENARIOS.filter((name) => !byScenario.has(name));
   const problems = [

@@ -3,7 +3,15 @@ import { z } from "zod";
 
 import { KITE_NETWORKS, matchNetwork, type KiteNetworkName } from "../networks.js";
 import { decodeHeaderValue, findHeader } from "../wire.js";
-import { asRecord, pickPaymentOption, pickRaw, pickString, unsafeIntegerFields } from "./parse.js";
+import {
+  AMOUNT_ALIASES,
+  asRecord,
+  pickPaymentOption,
+  pickRaw,
+  pickString,
+  pickStringWithConflict,
+  unsafeIntegerFields,
+} from "./parse.js";
 import { fail, pass, skip, type CheckResult } from "./types.js";
 
 /**
@@ -35,7 +43,7 @@ const FIELD_ALIASES = {
   network: ["network", "chainId", "chain"],
   asset: ["asset", "token", "assetAddress"],
   payTo: ["payTo", "payToAddress", "recipient", "receiver"],
-  amount: ["maxAmountRequired", "amount", "maxAmount", "price"],
+  amount: AMOUNT_ALIASES,
 } as const;
 
 const Envelope = z.object({ x402Version: z.number().int().positive() }).passthrough();
@@ -181,14 +189,29 @@ export function checkChallenge(input: ChallengeInput): CheckResult[] {
     results.push(pass("c2.pay-to", "payTo is a valid address", payTo, "critical", { payTo }));
   }
 
-  const amountRaw = pickString(accept, FIELD_ALIASES.amount);
-  const amount = checkAmount(amountRaw, unsafeIntegerFields(accept, FIELD_ALIASES.amount).length > 0);
+  const amountRead = pickStringWithConflict(accept, FIELD_ALIASES.amount);
+  const amountRaw = amountRead.value;
+  const unsafeAmount = unsafeIntegerFields(accept, FIELD_ALIASES.amount);
+  // Conflicting aliases are not "tolerant naming": the same quote carries two
+  // different amounts, so a client could be charged either one. Taking the
+  // first alias would let C2 validate one amount while C3 validates another.
+  const amountConflict =
+    amountRead.conflicting.length > 0
+      ? `amount aliases disagree: ${amountRead.conflicting
+          .map((key) => `${key}=${String(accept[key])}`)
+          .join(", ")}`
+      : undefined;
+  const amount = checkAmount(amountRaw, unsafeAmount.length > 0);
   results.push(
-    amount.ok
-      ? pass("c2.amount", "amount is positive atomic integer", `${amountRaw ?? ""} (atomic units)`)
-      : fail("c2.amount", "amount is positive atomic integer", amount.reason, "critical", {
-          amount: amountRaw ?? null,
-        }),
+    amountConflict !== undefined
+      ? fail("c2.amount", "amount is positive atomic integer", amountConflict, "critical", {
+          conflictingAliases: amountRead.conflicting,
+        })
+      : amount.ok
+        ? pass("c2.amount", "amount is positive atomic integer", `${amountRaw ?? ""} (atomic units)`)
+        : fail("c2.amount", "amount is positive atomic integer", amount.reason, "critical", {
+            amount: amountRaw ?? null,
+          }),
   );
 
   if (input.expectedPayTo === undefined) {

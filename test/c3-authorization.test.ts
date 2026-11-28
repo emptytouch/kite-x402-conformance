@@ -649,4 +649,25 @@ describe("C3 — authorisation", () => {
       expect(recomputed.toLowerCase()).not.toBe(account.address.toLowerCase());
     });
   });
+
+  it("fails closed when the quote carries conflicting amount aliases", async () => {
+    // Same quote, two different amounts. C2 rejects it as a conflicting
+    // challenge; C3 must not bind the authorisation to just one of them and
+    // report green. Previously C3 read `amount` while C2 read
+    // `maxAmountRequired`, so a 10^6x disagreement passed both checks.
+    const conflictingQuote = { amount: "1000000", maxAmountRequired: "1" };
+    const results = byId(
+      await checkAuthorization(
+        input(
+          challenge(conflictingQuote),
+          await payment({ accepted: option(conflictingQuote), auth: { value: "1000000" } }),
+        ),
+      ),
+    );
+    const failing = Object.values(results).filter((r) => r.status === "fail");
+    expect(failing.length).toBeGreaterThan(0);
+    expect(
+      failing.some((r) => (r.detail ?? "").includes("conflicting aliases")),
+    ).toBe(true);
+  });
 });

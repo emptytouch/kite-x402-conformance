@@ -6,6 +6,10 @@
 
 ### Added
 
+- **金额别名冲突 fail-closed（跨 C1 / C2 / C3）**：新增共享 `AMOUNT_ALIASES` 常量（`maxAmountRequired` 优先）与 `pickStringWithConflict()`。此前 C2 / C1 探针读 `maxAmountRequired`、C3 读 `amount`，同一份报价同时带两个不同金额时 C2 报 `1`、C3 报 `1000000`、三者零 fail 全绿（实测 10⁶ 倍超付/少付风险）。现在多个别名值不同即判失败：C2 `c2.amount` fail、C3 binding 失败、C1 探针抛 runner error（退出码 3）。值相同（含数字与字符串同值）不误判。三处别名顺序统一，防止再次漂移；同步修正 `docs/CHECKS.md` 中写反的别名顺序
+- **C4 / C5 输入改为一次性快照**：`snapshotObservation` / `snapshotAttempt` 用 `readOnce()` 在一次读取中同时取得「是否自有属性」与「值」，所有判定只消费快照。此前 `validObservation` 不查自有属性（原型链字段可让 12/12 全绿），`validAttempt` 在校验期与判定期重复读同一字段（getter 换值可把真实二次扣款判成 `no-rebill` pass）。现在必需字段必须为自有属性、可选状态字段拒绝继承的非 undefined 值，且每个字段只读一次
+- **来源独立性：loopback 主机名归一化**：`sameOrigin` 原先只认 `localhost` / `127.0.0.1` / `::1` 四个字符串，`localhost.`、`127/8` 任意地址、`0.0.0.0`、`::`、`::ffff:*` 会被当成不同 origin，卖家可用这些写法把自回显清单标成 `well-known` 并拿到 12/12 全绿。现统一归一化后判断，测试覆盖八种 loopback 写法与三类不同 origin
+- 测试从 250 个增至 258 个：新增金额冲突（C2 / C3 / C1 各一）、金额一致别名、C4 原型继承拒绝、C5 getter 换值、loopback 归一化与不同 origin 共 8 条；四项修复均做非假绿变异验证（关闭对应防护后测试变红）
 - **C1 清单解析 + 真实 HTTP 探针执行层**（`src/manifest.ts` + `src/probes/manifest.ts`）：`x402conf verify-manifest` 从本地 `--manifest` 或不同 origin 的 `--manifest-url`（路径须严格为 `/.well-known/x402`）读清单，对每个声明 path 发真实 `GET`，从实际 402 响应的 `PAYMENT-REQUIRED` 生成 `ObservedEntry`，再交给 C1 判定层比对网络 / 收款方 / 资产 / 金额。支持 JSON 与受限 YAML（BOM、行尾注释、无缩进序列；拒绝锚点、fragment、network-path reference）；金额必须是带引号的原子单位整数字符串，JSON number / YAML 裸数字拒绝。路径必须留在 `--base-url` 的 origin 内；非 402 / 无头响应用固定占位值触发 `c1.challenge-shape` 明确失败并级联 skip；头存在但不可解码 / 缺支付字段 / unsafe number 是 runner 错误（退出码 3）
 - **C1 来源独立性与 fail-closed**：本地文件标 `static-file`；远程清单只有路径为 `/.well-known/x402` 且 origin 不同（localhost / 127.0.0.1 / `[::1]` 视为同机）才标 `well-known`；其余标 `unknown`。`--source` 只能确认 runner 判定，不能把 `unknown` 升级为独立来源。`source=unknown` 或「0 pass 且只有 skip」时退出码 3，不能把全 skip 报告当通过；位置参数显式拒绝
 - **CLI `verify-manifest` 契约**：`--manifest` / `--manifest-url` 二选一必填、`--base-url` 必填、`--timeout`、`--source`、`--json`；JSON 报告附 `manifest.entries`（解析后的声明）与 `manifest.probes`（真实响应 path / status / 解出的挑战字段），可独立复核。实测良性清单 12/12 exit 0，金额从 `1000` 改为 `2000` 的负对照 11/1 exit 1（`c1.amount-match` 报 declared 2000, observed 1000）

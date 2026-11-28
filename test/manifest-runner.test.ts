@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
+import { sameOrigin } from "../src/cli.js";
 import { parseManifest } from "../src/manifest.js";
 import {
   isManifestSource,
@@ -419,16 +420,32 @@ describe("manifest runner regression guards", () => {
     ).rejects.toThrow(/missing a required payment field/);
   });
 
-  it("prefers maxAmountRequired over amount like C2 does", async () => {
+  it("rejects conflicting amount aliases instead of silently taking one", async () => {
+    // Two aliases with different amounts are not "tolerant naming" — there is
+    // no single real amount to compare. The old behaviour picked
+    // maxAmountRequired and let C2/C3/C1 disagree on the same quote.
+    await expect(
+      runManifestProbes({
+        entries: [...entries],
+        baseUrl: "https://seller.example",
+        source: "static-file",
+        fetcher: fakeFetcher({
+          "/v1/echo": goodResponse({ amount: "1000", maxAmountRequired: "9999" }),
+        }),
+      }),
+    ).rejects.toThrow(/conflicting amount aliases/);
+  });
+
+  it("accepts both amount aliases when their values agree", async () => {
     const run = await runManifestProbes({
       entries: [...entries],
       baseUrl: "https://seller.example",
       source: "static-file",
       fetcher: fakeFetcher({
-        "/v1/echo": goodResponse({ amount: "1000", maxAmountRequired: "9999" }),
+        "/v1/echo": goodResponse({ amount: "1000", maxAmountRequired: "1000" }),
       }),
     });
-    expect(run.results.find((result) => result.id === "c1.amount-match")?.status).toBe("fail");
+    expect(run.results.find((result) => result.id === "c1.amount-match")?.status).toBe("pass");
   });
 
   it("skips value assertions when the response is not a challenge", async () => {
@@ -440,6 +457,33 @@ describe("manifest runner regression guards", () => {
     });
     for (const id of ["c1.network-match", "c1.pay-to-match", "c1.asset-match", "c1.amount-match"])
       expect(run.results.find((result) => result.id === id)?.status).toBe("skip");
+  });
+});
+
+describe("manifest source independence: loopback normalisation", () => {
+  it("treats every spelling of the loopback machine as the same origin", () => {
+    // A seller must not escape the source check by writing a different
+    // loopback alias in its self-echoed well-known URL.
+    const base = "http://127.0.0.1:8080";
+    for (const alias of [
+      "http://localhost:8080",
+      "http://localhost.:8080",
+      "http://127.0.0.2:8080",
+      "http://127.255.255.254:8080",
+      "http://0.0.0.0:8080",
+      "http://[::1]:8080",
+      "http://[::ffff:127.0.0.1]:8080",
+      "http://2130706433:8080", // normalised to 127.0.0.1 by WHATWG URL
+    ]) {
+      expect(sameOrigin(alias, base), alias).toBe(true);
+      expect(sameOrigin(base, alias), alias).toBe(true);
+    }
+  });
+
+  it("keeps genuinely different origins distinct", () => {
+    expect(sameOrigin("https://docs.example.org/.well-known/x402", "https://api.example.com")).toBe(false);
+    expect(sameOrigin("http://localhost:8080", "https://localhost:8080")).toBe(false);
+    expect(sameOrigin("http://example.com", "http://127.0.0.1")).toBe(false);
   });
 });
 

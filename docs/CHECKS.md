@@ -140,7 +140,9 @@ skip 规则（级联，skip 永远不等于通过）：
 | 网络 | `network` / `chainId` / `chain` |
 | 资产 | `asset` / `token` / `assetAddress` |
 | 收款地址 | `payTo` / `payToAddress` / `recipient` / `receiver` |
-| 金额 | `amount` / `maxAmountRequired` / `maxAmount` / `price` |
+| 金额 | `maxAmountRequired` / `amount` / `maxAmount` / `price`（`maxAmountRequired` 为 v2 规范字段，优先读取；C2 / C3 / C1 探针共用 `AMOUNT_ALIASES` 常量） |
+
+多个别名同时存在且**值不同**时判失败，不静默取第一个：否则 C2 校验 `1`、C3 绑定 `1000000`，同一份报价两处都绿灯，可能超付或少付。值相同（含 `"1000"` 与数字 `1000`）不算冲突。C1 探针遇到冲突金额时抛 runner 错误（退出码 3），因为无法构造唯一可信的观测值。
 
 ### 网络字段归一化
 

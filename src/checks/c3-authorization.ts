@@ -40,7 +40,16 @@ import {
 } from "../eip712.js";
 import { chainIdFromNetworkField, KITE_NETWORKS, matchNetwork, type KiteNetworkName } from "../networks.js";
 import { decodeHeaderValue } from "../wire.js";
-import { asRecord, pickPaymentOptions, pickRaw, pickRecord, pickString, unsafeIntegerFields } from "./parse.js";
+import {
+  AMOUNT_ALIASES,
+  asRecord,
+  pickPaymentOptions,
+  pickRaw,
+  pickRecord,
+  pickString,
+  pickStringWithConflict,
+  unsafeIntegerFields,
+} from "./parse.js";
 import { fail, pass, skip, type CheckLevel, type CheckResult } from "./types.js";
 
 /**
@@ -55,7 +64,7 @@ const MAX_UINT256 = (1n << 256n) - 1n;
 
 const ASSET_KEYS = ["asset", "token", "assetAddress"] as const;
 const PAY_TO_KEYS = ["payTo", "payToAddress", "recipient", "receiver"] as const;
-const AMOUNT_KEYS = ["amount", "maxAmountRequired", "maxAmount", "price"] as const;
+const AMOUNT_KEYS = AMOUNT_ALIASES;
 
 const ID = {
   challenge: "c3.challenge",
@@ -136,12 +145,26 @@ function readUint(
   record: Record<string, unknown>,
   keys: readonly string[],
   label: string,
+  conflictLabel?: string,
 ): FieldResult<bigint> {
   if (unsafeIntegerFields(record, keys).length > 0) {
     return {
       ok: false,
       reason: `${label} was sent as a JSON number above 2^53 and has already been rounded; send a decimal string`,
     };
+  }
+  // Safety-bearing fields (the quoted amount) must not silently pick the first
+  // alias when several carry different values. C2 rejects the same conflict on
+  // the challenge; without this, C3 could bind to a different amount than C2
+  // validated and both checks would still pass.
+  if (conflictLabel !== undefined) {
+    const read = pickStringWithConflict(record, keys);
+    if (read.conflicting.length > 0) {
+      const detail = read.conflicting
+        .map((key) => `${key}=${String(record[key])}`)
+        .join(", ");
+      return { ok: false, reason: `${conflictLabel} has conflicting aliases: ${detail}` };
+    }
   }
   const raw = pickString(record, keys);
   if (raw === undefined) return { ok: false, reason: `${label} is missing` };
@@ -312,8 +335,8 @@ function acceptanceDeviations(
     deviations.push(`payTo: option=${optionPayTo ?? "missing"} accepted=${acceptedPayTo ?? "missing"}`);
   }
 
-  const optionAmount = readUint(option, AMOUNT_KEYS, "option amount");
-  const acceptedAmount = readUint(accepted, AMOUNT_KEYS, "accepted amount");
+  const optionAmount = readUint(option, AMOUNT_KEYS, "option amount", "option amount");
+  const acceptedAmount = readUint(accepted, AMOUNT_KEYS, "accepted amount", "accepted amount");
   if (!optionAmount.ok || !acceptedAmount.ok || optionAmount.value !== acceptedAmount.value) {
     const render = (field: FieldResult<bigint>): string =>
       field.ok ? field.value.toString() : `unreadable (${field.reason})`;
@@ -446,7 +469,7 @@ export async function checkAuthorization(input: AuthorizationInput): Promise<Che
   const challengeNetworkRaw = pickRaw(option, ["network", "chainId", "chain"]);
   const challengeAsset = pickString(option, ASSET_KEYS);
   const challengePayTo = pickString(option, PAY_TO_KEYS);
-  const challengeAmount = readUint(option, AMOUNT_KEYS, "challenge amount");
+  const challengeAmount = readUint(option, AMOUNT_KEYS, "challenge amount", "challenge amount");
 
   // ------------------------------------------------------------ payload version
   const payloadVersion = paymentEnvelope["x402Version"];
@@ -574,7 +597,10 @@ export async function checkAuthorization(input: AuthorizationInput): Promise<Che
     results.push(pass(ID.bindingPayTo, titleOf(ID.bindingPayTo), `pays ${expectedPayTo}`));
   }
 
-  const expectedAmount = accepted !== undefined ? readUint(accepted, AMOUNT_KEYS, "accepted amount") : challengeAmount;
+  const expectedAmount =
+    accepted !== undefined
+      ? readUint(accepted, AMOUNT_KEYS, "accepted amount", "accepted amount")
+      : challengeAmount;
   if (!expectedAmount.ok) {
     results.push(
       fail(ID.bindingValue, titleOf(ID.bindingValue), `the quote amount is unreadable: ${expectedAmount.reason}`),

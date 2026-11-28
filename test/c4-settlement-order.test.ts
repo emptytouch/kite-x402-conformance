@@ -304,4 +304,17 @@ describe("C4 settlement order — boundaries and skip rules", () => {
     // With a broken input set nothing is verified, so nothing may be green.
     expect(results.some((result) => result.status === "pass")).toBe(false);
   });
+
+  test("rejects observations whose trust fields come from a prototype", () => {
+    // A polluted prototype must not be able to supply `settled` /
+    // `upstreamCalled`. All fields must be own properties of each observation.
+    const inherited = Object.values(probes()).map((probe) => {
+      const own = { ...probe };
+      const asProto = Object.assign(Object.create(null), own);
+      return Object.create(asProto) as ProbeObservation;
+    });
+    const results = checkSettlementOrder({ observations: inherited });
+    expect(byId(results).get("c4.probes")?.status).toBe("fail");
+    expect(results.every((r) => r.status !== "pass")).toBe(true);
+  });
 });

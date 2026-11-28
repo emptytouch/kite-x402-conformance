@@ -425,19 +425,51 @@ interface ManifestVerifyOptions {
   json?: boolean;
 }
 
-function sameOrigin(a: string, b: string): boolean {
+/**
+ * Whether a hostname is a loopback address after normalisation.
+ *
+ * A service must not label its own echoed manifest as an independent
+ * `well-known` source just by writing the loopback address differently. The
+ * old string set missed `localhost.` (trailing dot), any `127/8` address and
+ * `0.0.0.0`, all of which route to the same machine as `127.0.0.1`.
+ */
+function isLoopbackHost(rawHostname: string): boolean {
+  const host = rawHostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host === "0.0.0.0" || host === "::" || host === "[::]") return true;
+  // IPv6 loopback, with or without URL brackets.
+  if (host === "::1" || host === "[::1]") return true;
+  // IPv4-mapped IPv6 loopback. WHATWG URL rewrites [::ffff:127.0.0.1] to
+  // [::ffff:7f00:1], so accept both the dotted and hexadecimal forms.
+  const v4MappedDotted = /^\[?::ffff:(\d+\.\d+\.\d+\.\d+)\]?$/.exec(host);
+  if (v4MappedDotted !== null) return isLoopbackHost(v4MappedDotted[1]!);
+  const v4MappedHex = /^\[?::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})\]?$/.exec(host);
+  if (v4MappedHex !== null) {
+    // The last two 16-bit groups are the IPv4 address in hex (7f00:1 = 127.0.0.1).
+    const high = Number.parseInt(v4MappedHex[1]!, 16);
+    const low = Number.parseInt(v4MappedHex[2]!, 16);
+    const dotted = `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+    return isLoopbackHost(dotted);
+  }
+  // The whole 127/8 block is loopback, not just 127.0.0.1.
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (octets !== null) {
+    const [a, b] = [Number(octets[1]), Number(octets[2])];
+    return a === 127 || (a === 0 && b === 0 && Number(octets[3]) === 0 && Number(octets[4]) === 0);
+  }
+  return false;
+}
+
+export function sameOrigin(a: string, b: string): boolean {
   try {
     const left = new URL(a);
     const right = new URL(b);
     if (left.origin === right.origin) return true;
-    // localhost and 127.0.0.1 are the same machine in local/CI deployments.
-    // Treating them as different origins would let a service echo its own
-    // challenge and still be labelled an independent well-known manifest.
-    const loopback = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+    // Different spellings of the same loopback machine are not independent
+    // sources, even though their origins differ as strings.
     return (
       left.protocol === right.protocol &&
-      loopback.has(left.hostname) &&
-      loopback.has(right.hostname)
+      isLoopbackHost(left.hostname) &&
+      isLoopbackHost(right.hostname)
     );
   } catch {
     return false;

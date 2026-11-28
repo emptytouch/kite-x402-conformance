@@ -110,43 +110,84 @@ function isOptionalStatus(value: unknown): value is number | undefined {
   return value === undefined || isStatus(value);
 }
 
-/** Validate one observation without trusting the probe label to carry truth. */
-function validObservation(value: unknown): value is ProbeObservation {
+/**
+ * Read a field once, remembering whether it was an own property.
+ *
+ * Checking `hasOwn` and then reading `record[key]` are two separate reads: an
+ * accessor could report itself as own but return a different value on the
+ * second read. Returning both facts from a single read keeps validation and
+ * snapshot consistent.
+ */
+function readOnce(
+  record: Record<string, unknown>,
+  key: string,
+): { own: boolean; value: unknown } {
+  return { own: Object.hasOwn(record, key), value: record[key] };
+}
+
+/**
+ * Validate and snapshot one observation in a single pass.
+ *
+ * Two trust rules: (1) fields must be own properties — a polluted prototype
+ * must not supply the flags that decide whether money moved; (2) each field
+ * is read exactly once and copied into a plain object, so an accessor cannot
+ * show a benign value during validation and a harmful one at verdict time.
+ */
+function snapshotObservation(value: unknown): ProbeObservation | undefined {
   const record = asRecord(value);
-  if (record === undefined) return false;
-  if (!ALL_PROBES.includes(record["probe"] as ProbeName)) return false;
-  if (!isStatus(record["responseStatus"])) return false;
-  if (!isOptionalStatus(record["upstreamStatus"])) return false;
-  if (!isOptionalStatus(record["settlementStatus"])) return false;
-  if (typeof record["upstreamCalled"] !== "boolean") return false;
-  if (typeof record["settled"] !== "boolean") return false;
+  if (record === undefined) return undefined;
+  // Read every field exactly once (own-ness and value from the same read).
+  // Optional status fields may be absent after a JSON round-trip, but an
+  // inherited non-undefined value must never be accepted.
+  const probe = readOnce(record, "probe");
+  const responseStatus = readOnce(record, "responseStatus");
+  const responseHeaderField = readOnce(record, "responseHeaders");
+  const upstreamCalled = readOnce(record, "upstreamCalled");
+  const settled = readOnce(record, "settled");
+  const upstreamStatus = readOnce(record, "upstreamStatus");
+  const settlementStatus = readOnce(record, "settlementStatus");
+  for (const field of [probe, responseStatus, responseHeaderField, upstreamCalled, settled]) {
+    if (!field.own) return undefined;
+  }
+  if (!upstreamStatus.own && upstreamStatus.value !== undefined) return undefined;
+  if (!settlementStatus.own && settlementStatus.value !== undefined) return undefined;
 
-  // Cross-field consistency. A boolean that contradicts its own status field
-  // is not a usable observation: trusting it is exactly how a server could
-  // report "no settlement" while the facilitator status shows a charge.
-  const upstreamCalled = record["upstreamCalled"];
-  const upstreamStatus = record["upstreamStatus"];
-  if (upstreamCalled && upstreamStatus === undefined) return false;
-  if (!upstreamCalled && upstreamStatus !== undefined) return false;
-  const settled = record["settled"];
-  const settlementStatus = record["settlementStatus"];
-  // "settled" means settlement really happened: the facilitator must have
-  // returned a success status. Those two fields must stay in lockstep.
-  if (settled) {
-    if (settlementStatus === undefined) return false;
-    if (settlementStatus < 200 || settlementStatus >= 300) return false;
-  } else if (settlementStatus !== undefined) {
-    return false;
+  if (!ALL_PROBES.includes(probe.value as ProbeName)) return undefined;
+  if (!isStatus(responseStatus.value)) return undefined;
+  if (!isOptionalStatus(upstreamStatus.value)) return undefined;
+  if (!isOptionalStatus(settlementStatus.value)) return undefined;
+  if (typeof upstreamCalled.value !== "boolean") return undefined;
+  if (typeof settled.value !== "boolean") return undefined;
+
+  // A boolean that contradicts its own status field is not a usable
+  // observation: a server could report "no settlement" while the facilitator
+  // status shows a charge.
+  if (upstreamCalled.value && upstreamStatus.value === undefined) return undefined;
+  if (!upstreamCalled.value && upstreamStatus.value !== undefined) return undefined;
+  if (settled.value) {
+    if (settlementStatus.value === undefined) return undefined;
+    if (settlementStatus.value < 200 || settlementStatus.value >= 300) return undefined;
+  } else if (settlementStatus.value !== undefined) {
+    return undefined;
   }
 
-  const headers = asRecord(record["responseHeaders"]);
-  if (headers === undefined) return false;
-  // responseHeaders is Record<string,string>. A non-string value would make
-  // header decoding throw, turning a check into a crash instead of a verdict.
-  for (const value of Object.values(headers)) {
-    if (typeof value !== "string") return false;
+  const headers = asRecord(responseHeaderField.value);
+  if (headers === undefined) return undefined;
+  const headerSnapshot: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (typeof value !== "string") return undefined;
+    headerSnapshot[name] = value;
   }
-  return true;
+
+  return {
+    probe: probe.value as ProbeName,
+    responseStatus: responseStatus.value,
+    responseHeaders: headerSnapshot,
+    upstreamCalled: upstreamCalled.value,
+    upstreamStatus: upstreamStatus.value,
+    settled: settled.value,
+    settlementStatus: settlementStatus.value,
+  };
 }
 
 const TX_HASH_ALIASES = ["txHash", "transactionHash", "tx", "hash"] as const;
@@ -220,13 +261,13 @@ export function checkSettlementOrder(input: SettlementOrderInput): CheckResult[]
     return results;
   }
   for (let index = 0; index < observations.length; index++) {
-    const entry = observations[index];
-    if (!validObservation(entry)) {
+    const snapshot = snapshotObservation(observations[index]);
+    if (snapshot === undefined) {
       invalid.push(`index ${index} is not a well-formed probe observation`);
       continue;
     }
-    if (byProbe.has(entry.probe)) duplicates.push(entry.probe);
-    else byProbe.set(entry.probe, entry);
+    if (byProbe.has(snapshot.probe)) duplicates.push(snapshot.probe);
+    else byProbe.set(snapshot.probe, snapshot);
   }
   const missing = ALL_PROBES.filter((probe) => !byProbe.has(probe));
   const problems = [

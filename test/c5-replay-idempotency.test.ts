@@ -437,6 +437,34 @@ describe("C5 — input validation and skip semantics", () => {
     });
     expect(byId(results).get("c5.idempotency.first-settled")?.status).toBe("fail");
   });
+
+  test("an accessor cannot change settled/cacheHit between validation and verdict", () => {
+    // A hostile observation shows a benign value while being validated, then
+    // flips to a real second charge when the verdict reads the field again.
+    // The checker must snapshot each field once, so the verdict sees the same
+    // value that validation accepted.
+    const base = attempts();
+    const second: Record<string, unknown> = { ...base.idempotencyKey.second };
+    let settledReads = 0;
+    let cacheReads = 0;
+    Object.defineProperty(second, "settled", {
+      enumerable: true,
+      get: () => (++settledReads <= 2 ? false : true),
+    });
+    Object.defineProperty(second, "cacheHit", {
+      enumerable: true,
+      get: () => (++cacheReads <= 2 ? true : false),
+    });
+    const scenarios: ReplayScenarioObservation[] = (Object.keys(base) as ReplayScenarioName[]).map((name) => ({
+      scenario: name,
+      first: base[name].first,
+      second: name === "idempotencyKey" ? (second as unknown as ReplayAttempt) : base[name].second,
+    }));
+    checkReplayIdempotency({ scenarios });
+    // Exactly one read per field: validation and verdict share one snapshot.
+    expect(settledReads).toBe(1);
+    expect(cacheReads).toBe(1);
+  });
 });
 
 // Scenario builders used by the raw-input tests above.

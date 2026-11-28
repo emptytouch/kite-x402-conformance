@@ -37,6 +37,63 @@ export function pickString(
 }
 
 /**
+ * Canonical alias order for an atomic amount in an x402 v2 payment option.
+ *
+ * C2 (challenge structure), C3 (authorisation binding) and the C1 manifest
+ * probe must read the amount in the same order; otherwise the same quote can
+ * validate as "1" in one check and "1000000" in another. A single exported
+ * constant keeps the three in lockstep. `maxAmountRequired` is first because
+ * it is the v2 canonical field name.
+ */
+export const AMOUNT_ALIASES = [
+  "maxAmountRequired",
+  "amount",
+  "maxAmount",
+  "price",
+] as const;
+
+/**
+ * Result of reading a field that has several accepted aliases.
+ *
+ * `value` is the first usable alias, matching `pickString`. `conflicting`
+ * lists aliases that carried a different usable value. Callers that use an
+ * alias list for a value with safety consequences (an amount) must reject the
+ * read when `conflicting` is non-empty: silently taking the first alias lets
+ * one check authorise "1" while another checks "1000000" on the same quote.
+ */
+export interface AliasRead {
+  readonly value: string | undefined;
+  readonly conflicting: readonly string[];
+}
+
+/**
+ * Read aliases as strings while detecting disagreeing duplicates.
+ *
+ * Numeric safety follows `pickString`: a safe integer is stringified, an
+ * unsafe number is reported through `unsafeIntegerFields` by the caller. Two
+ * aliases are "conflicting" only when both produced usable, normalised
+ * strings that differ. Empty / whitespace-only strings are ignored, so an
+ * unused alias does not manufacture a conflict.
+ */
+export function pickStringWithConflict(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+): AliasRead {
+  let value: string | undefined;
+  const conflicting: string[] = [];
+  for (const key of keys) {
+    const raw = record[key];
+    let candidate: string | undefined;
+    if (typeof raw === "string" && raw.trim().length > 0) candidate = raw.trim();
+    else if (typeof raw === "number" && Number.isSafeInteger(raw)) candidate = String(raw);
+    if (candidate === undefined) continue;
+    if (value === undefined) value = candidate;
+    else if (value !== candidate) conflicting.push(key);
+  }
+  return { value, conflicting };
+}
+
+/**
  * Names of fields that arrived as JSON numbers too large to represent exactly.
  *
  * `JSON.parse("9007199254740993")` yields `9007199254740992`. Reporting that as

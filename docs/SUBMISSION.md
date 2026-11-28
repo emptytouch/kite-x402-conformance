@@ -48,18 +48,18 @@ $ npm run check
  RUN  v2.1.9
  ✓ test/wire.test.ts (8 tests)
  ✓ test/networks.test.ts (9 tests)
- ✓ test/c5-replay-idempotency.test.ts (31 tests)
- ✓ test/c4-settlement-order.test.ts (24 tests)
+ ✓ test/c5-replay-idempotency.test.ts (32 tests)
+ ✓ test/c4-settlement-order.test.ts (25 tests)
  ✓ test/c1-manifest.test.ts (29 tests)
- ✓ test/c2-challenge.test.ts (21 tests)
+ ✓ test/c2-challenge.test.ts (23 tests)
  ✓ test/eip712.test.ts (16 tests)
- ✓ test/c3-authorization.test.ts (46 tests)
+ ✓ test/c3-authorization.test.ts (47 tests)
  ✓ test/settlement-order-runner.test.ts (18 tests)
  ✓ test/replay-runner.test.ts (20 tests)
- ✓ test/manifest-runner.test.ts (28 tests)
+ ✓ test/manifest-runner.test.ts (31 tests)
 
  Test Files  11 passed (11)
-      Tests  250 passed (250)
+      Tests  258 passed (258)
 
 > tsc -p tsconfig.build.json
 exit=0
@@ -160,7 +160,8 @@ node dist/cli.js verify-manifest --manifest manifest.json --base-url http://loca
 | C1 清单一致性 | `src/checks/c1-manifest.ts` | 12 | 29 | 已 commit `12be087` | 155 → 184 |
 | C4 sandbox 探针执行层 + `verify` | `src/probes/settlement-order.ts`、`src/sandbox/` | 12（复用判定层） | 18 | 已 commit `1a61cfc` | 184 → 202 |
 | C5 sandbox 探针执行层 + `verify-replay` | `src/probes/replay.ts`、`src/sandbox/replay-seller.ts`、`src/sandbox/mock-services.ts` | 13（复用判定层） | 20 | 本次新增（Unreleased） | 202 → 222 |
-| C1 清单解析 + HTTP 探针 runner + `verify-manifest` | `src/manifest.ts`、`src/probes/manifest.ts` | 12（复用判定层） | 28 | 本次新增（Unreleased） | 222 → 250 |
+| C1 清单解析 + HTTP 探针 runner + `verify-manifest` | `src/manifest.ts`、`src/probes/manifest.ts` | 12（复用判定层） | 31 | 本次新增（Unreleased） | 222 → 258（含下方 8 条安全加固） |
+| 金额别名冲突 / 输入快照 / 来源独立性加固 | `src/checks/parse.ts`、`c2-challenge.ts`、`c3-authorization.ts`、`c4-settlement-order.ts`、`c5-replay-idempotency.ts`、`src/cli.ts` | — | 8 | 本次新增（Unreleased） | 统一 `AMOUNT_ALIASES`；C4/C5 一次性快照 + 自有属性；loopback 归一化 |
 
 六个增量都未发布为新的 npm 版本，也不计入 `0.2.0` 的定稿区间。
 

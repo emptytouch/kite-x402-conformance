@@ -15,7 +15,14 @@ import {
   type ManifestSource,
   type ObservedEntry,
 } from "../checks/c1-manifest.js";
-import { pickPaymentOption, pickRaw, pickString, unsafeIntegerFields } from "../checks/parse.js";
+import {
+  AMOUNT_ALIASES,
+  pickPaymentOption,
+  pickRaw,
+  pickString,
+  pickStringWithConflict,
+  unsafeIntegerFields,
+} from "../checks/parse.js";
 import type { CheckResult } from "../checks/types.js";
 import { decodeHeaderValue, findHeader } from "../wire.js";
 
@@ -104,7 +111,7 @@ function observeResponse(
   // the presence check so the diagnostic names the real problem rather than
   // claiming the field is missing.
   const unsafe = unsafeIntegerFields(option, [
-    "maxAmountRequired", "amount", "maxAmount", "price", "network", "chainId", "chain",
+    ...AMOUNT_ALIASES, "network", "chainId", "chain",
   ]);
   if (unsafe.length > 0)
     throw new Error(`PAYMENT-REQUIRED at ${path} has unsafe numeric fields: ${unsafe.join(", ")}`);
@@ -112,7 +119,8 @@ function observeResponse(
   const network = pickRaw(option, ["network", "chainId", "chain"]);
   const payTo = pickString(option, ["payTo", "payToAddress", "recipient", "receiver"]);
   const asset = pickString(option, ["asset", "token", "assetAddress"]);
-  const amount = pickString(option, ["maxAmountRequired", "amount", "maxAmount", "price"]);
+  const amountRead = pickStringWithConflict(option, AMOUNT_ALIASES);
+  const amount = amountRead.value;
 
   if (
     network === undefined ||
@@ -121,6 +129,15 @@ function observeResponse(
     amount === undefined
   )
     throw new Error(`PAYMENT-REQUIRED at ${path} is missing a required payment field`);
+  // Conflicting amount aliases mean the probe cannot produce one trustworthy
+  // observed amount. This is a runner error (exit 3), never a conformance
+  // verdict: there is no single real amount to compare against the manifest.
+  if (amountRead.conflicting.length > 0)
+    throw new Error(
+      `PAYMENT-REQUIRED at ${path} has conflicting amount aliases: ${amountRead.conflicting
+        .map((key) => `${key}=${String(option[key])}`)
+        .join(", ")}`,
+    );
   const entry: ObservedEntry = {
     path,
     responseStatus: status,

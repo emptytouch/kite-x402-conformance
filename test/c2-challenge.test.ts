@@ -194,4 +194,18 @@ describe("C2 — 402 challenge structure", () => {
     expect(results["c2.scheme"]?.status).toBe("fail");
     expect(results["c2.network"]?.status).toBe("skip");
   });
+
+  it("fails closed when amount aliases disagree, instead of validating only the first", () => {
+    // A quote carrying maxAmountRequired=1 and amount=1000000 previously gave
+    // c2.amount=pass(1) while C3 bound to 1000000 — both checks green on the
+    // same conflicting quote. There is no single amount to validate.
+    const results = byId(checkChallenge(input(challenge({ amount: "1000000" }))));
+    expect(results["c2.amount"]?.status).toBe("fail");
+    expect(results["c2.amount"]?.detail).toMatch(/aliases disagree/);
+  });
+
+  it("accepts both amount aliases when their values agree", () => {
+    const results = byId(checkChallenge(input(challenge({ amount: "1000" }))));
+    expect(results["c2.amount"]?.status).toBe("pass");
+  });
 });
